@@ -1,11 +1,14 @@
-export type Protocol = "avr-dfu" | "halfkay" | "caterina" | "uf2-picoboot";
+export type Protocol = "avr-dfu" | "stm32-dfu" | "halfkay" | "caterina" | "uf2-picoboot";
 
 export type Transport = "usb" | "hid" | "serial";
 
 export interface ChipParams {
   readonly name: string;
+  /** Base address of flash in the chip's address space (e.g. 0x08000000 on STM32). */
+  readonly flashBaseAddress: number;
   readonly flashSizeBytes: number;
   readonly pageSizeBytes: number;
+  /** Offset from flashBaseAddress where the bootloader begins, or flashSizeBytes if the bootloader isn't in this flash region at all. */
   readonly bootloaderStartAddress: number;
 }
 
@@ -24,11 +27,10 @@ export interface BoardEntry {
   readonly bootloaderEntry: BootloaderEntryMethod;
 }
 
-export interface FlashableDevice {
-  readonly protocol: Protocol;
-  readonly transport: Transport;
-  readonly productName: string;
-}
+export type FlashableDevice =
+  | { readonly transport: "usb"; readonly protocol: Protocol; readonly productName: string; readonly boardId: string; readonly device: USBDevice }
+  | { readonly transport: "hid"; readonly protocol: Protocol; readonly productName: string; readonly boardId: string; readonly device: HIDDevice }
+  | { readonly transport: "serial"; readonly protocol: Protocol; readonly productName: string; readonly boardId: string; readonly device: SerialPort };
 
 export interface FirmwareImage {
   readonly bytes: Uint8Array;

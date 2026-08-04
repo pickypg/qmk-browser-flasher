@@ -22,8 +22,9 @@ like QMK Toolbox.
 
 ## 3. Target Bootloader Protocols (in priority order)
 
-| Protocol                   | Transport                         | Priority | Notes                                                                                                             |
-| -------------------------- | --------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------- |
+| Protocol                     | Transport                         | Priority | Notes                                                                                                                                                                                              |
+| ----------------------------- | --------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| STM32 DfuSe (ST factory bootloader) | WebUSB                      | —        | Not in the original priority list, but implemented first (M1) since it's the only protocol testable against real hardware (NuPhy Air75 V2, STM32F072). Standard USB DFU 1.1 + ST's AN3156 extension. |
 | AVR DFU (Atmel/LUFA)       | WebUSB                            | P0       | Most common on classic AVR QMK boards; reference implementation exists (webdfu, JS — will need a TS port/rewrite) |
 | HalfKay (Teensy)           | WebHID                            | P0       | Simple fixed-packet HID protocol, good first target                                                               |
 | Caterina (AVR109/STK500v2) | WebSerial                         | P1       | Serial-based, not USB control transfers — different API                                                           |
@@ -102,15 +103,18 @@ qmk-browser-flasher/
 
 ## 7. Milestones
 
-1. **M0 — Repo scaffold & tooling**: package.json, tsconfig.json (strict mode
-   on), bundler (Vite recommended for WebUSB/HID demo apps, has first-class
-   TS support), `@types/w3c-web-usb` / `@types/w3c-web-hid` and Web Serial
-   API type declarations, lint/test setup, empty module stubs matching the
-   tree above, `LICENSE` file, and a starter `docs/THIRD_PARTY_NOTICES.md`
-   (see Section 8).
-2. **M1 — AVR DFU happy path**: pair with a device already in DFU mode,
-   parse a `.hex`, flash one known board (pick a common atmega32u4 board as
-   the reference target), verify via readback.
+1. **M0 — Repo scaffold & tooling** ✅: package.json, tsconfig.json (strict
+   mode on), bundler (Vite recommended for WebUSB/HID demo apps, has
+   first-class TS support), `@types/w3c-web-usb` / `@types/w3c-web-hid` and
+   Web Serial API type declarations, lint/test setup, empty module stubs
+   matching the tree above, `LICENSE` file, and a starter
+   `docs/THIRD_PARTY_NOTICES.md` (see Section 8).
+2. **M1 — STM32 DfuSe happy path** ✅: pair with a device already in DFU
+   mode, parse a `.bin`, flash a NuPhy Air75 V2 (STM32F072), verify via
+   readback. Retargeted from the originally-planned AVR DFU happy path
+   since the Air75 V2 was the hardware actually available to test against
+   — see the STM32 DfuSe row added to Section 3 and `docs/PROTOCOL_NOTES.md`.
+   Verified end-to-end on real hardware 2026-08-04.
 3. **M2 — HalfKay support**: same happy-path flow for a Teensy-based board.
 4. **M3 — Bootloader-entry UX**: reset-button instructions + magic-key jump
    where supported, board lookup table.
