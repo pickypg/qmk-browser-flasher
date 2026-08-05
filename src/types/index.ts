@@ -21,16 +21,15 @@ export interface BoardEntry {
   readonly id: string;
   readonly name: string;
   readonly protocol: Protocol;
-  readonly chip: string;
   readonly usbVendorId?: number;
   readonly usbProductId?: number;
   readonly bootloaderEntry: BootloaderEntryMethod;
 }
 
 export type FlashableDevice =
-  | { readonly transport: "usb"; readonly protocol: Protocol; readonly productName: string; readonly boardId: string; readonly device: USBDevice }
-  | { readonly transport: "hid"; readonly protocol: Protocol; readonly productName: string; readonly boardId: string; readonly device: HIDDevice }
-  | { readonly transport: "serial"; readonly protocol: Protocol; readonly productName: string; readonly boardId: string; readonly device: SerialPort };
+  | { readonly transport: "usb"; readonly protocol: Protocol; readonly productName: string; readonly boardId?: string; readonly device: USBDevice }
+  | { readonly transport: "hid"; readonly protocol: Protocol; readonly productName: string; readonly boardId?: string; readonly device: HIDDevice }
+  | { readonly transport: "serial"; readonly protocol: Protocol; readonly productName: string; readonly boardId?: string; readonly device: SerialPort };
 
 export interface FirmwareImage {
   readonly bytes: Uint8Array;

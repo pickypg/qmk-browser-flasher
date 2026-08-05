@@ -1,10 +1,16 @@
-import type { ChipParams, FirmwareImage, FlashProgress, FlashResult } from "../types/index.js";
 import { verifyFlash } from "../core/verify.js";
+import type { FlashProgress, FlashResult } from "../types/index.js";
+import { type DfuSeSegment, findSegment, parseDfuSeMemoryLayout } from "./dfuse-memory-layout.js";
+import { findInterfaceStringIndex, getConfigurationDescriptor, getDefaultLangId, getStringDescriptor } from "./usb-descriptors.js";
 
 // ST "DfuSe" USB DFU extension (AN3156/AN2606), as used by the STM32 ROM
 // bootloader. Command bytes verified against dfu-util's src/dfuse.c
 // (GPL-2.0, read for the wire-protocol facts only — nothing here is
-// ported from it). See docs/PROTOCOL_NOTES.md.
+// ported from it). Chip flash layout (base address, size, page size) is
+// read live from the device's own DfuSe memory-layout descriptor string
+// (see dfuse-memory-layout.ts) rather than a per-chip data table — no
+// board-specific data is needed to flash a genuine ST DFU bootloader.
+// See docs/PROTOCOL_NOTES.md.
 
 const DFU_DNLOAD = 1;
 const DFU_UPLOAD = 2;
@@ -30,6 +36,11 @@ const DATA_TRANSACTION = 2;
  * it's the device's first (a DFU-capable device can expose others). */
 const DFU_INTERFACE_CLASS = 0xfe;
 const DFU_INTERFACE_SUBCLASS = 0x01;
+
+/** Every STM32 part maps its main flash here — this is architectural, not
+ * board- or chip-specific, so it's safe to use as a fixed lookup key into
+ * the device's own reported memory segments. */
+const STM32_FLASH_BASE = 0x08000000;
 
 interface DfuStatus {
   readonly status: number;
@@ -67,6 +78,65 @@ export function findDfuInterface(device: USBDevice): { interfaceNumber: number; 
     }
   }
   throw new Error("No DFU interface found on device");
+}
+
+function tryParseFlashSegments(name: string, alternateSetting: number, seen: string[]): { alternateSetting: number; segments: DfuSeSegment[] } | undefined {
+  let segments: DfuSeSegment[];
+  try {
+    segments = parseDfuSeMemoryLayout(name);
+  } catch (error) {
+    seen.push(`alt ${alternateSetting}: "${name}" failed to parse (${error instanceof Error ? error.message : String(error)})`);
+    return undefined;
+  }
+  if (findSegment(segments, STM32_FLASH_BASE)) {
+    return { alternateSetting, segments };
+  }
+  seen.push(`alt ${alternateSetting}: "${name}" parsed but doesn't cover 0x${STM32_FLASH_BASE.toString(16)}`);
+  return undefined;
+}
+
+/** Finds the DFU alternate setting whose memory-layout descriptor covers
+ * the main flash region, and returns its parsed segments. A DfuSe device
+ * can expose several alternates (Internal Flash, Option Bytes, OTP, ...);
+ * this doesn't assume which ordinal is which, it reads each descriptor. */
+export async function findFlashAlternate(device: USBDevice, interfaceNumber: number): Promise<{ alternateSetting: number; segments: DfuSeSegment[] }> {
+  const iface = device.configuration?.interfaces.find((i) => i.interfaceNumber === interfaceNumber);
+  const alternates = iface?.alternates ?? [];
+  const seen: string[] = [];
+
+  // Fast path: the browser already resolved the string descriptors.
+  for (const alt of alternates) {
+    if (!alt.interfaceName) {
+      continue;
+    }
+    const found = tryParseFlashSegments(alt.interfaceName, alt.alternateSetting, seen);
+    if (found) {
+      return found;
+    }
+  }
+
+  // Fallback: WebUSB's automatic string-descriptor resolution
+  // (USBAlternateInterface.interfaceName) is a SHOULD, not a MUST — some
+  // devices/browsers leave it null. Fetch it manually via GET_DESCRIPTOR.
+  const unresolved = alternates.filter((alt) => !alt.interfaceName);
+  if (unresolved.length > 0) {
+    const configDescriptor = await getConfigurationDescriptor(device);
+    const langId = await getDefaultLangId(device);
+    for (const alt of unresolved) {
+      const stringIndex = findInterfaceStringIndex(configDescriptor, interfaceNumber, alt.alternateSetting);
+      if (!stringIndex) {
+        seen.push(`alt ${alt.alternateSetting}: no iInterface string index in the configuration descriptor`);
+        continue;
+      }
+      const name = await getStringDescriptor(device, stringIndex, langId);
+      const found = tryParseFlashSegments(name, alt.alternateSetting, seen);
+      if (found) {
+        return found;
+      }
+    }
+  }
+
+  throw new Error(`No DfuSe alternate setting describes the main flash region (${alternates.length} alternate(s) seen: ${seen.join("; ") || "none"})`);
 }
 
 async function withContext<T>(label: string, fn: () => Promise<T>): Promise<T> {
@@ -200,31 +270,54 @@ async function leaveDfuMode(device: USBDevice, interfaceNumber: number): Promise
   } while (status.state !== STATE_DFU_DNLOAD_IDLE && status.state !== STATE_DFU_ERROR && status.state !== STATE_DFU_MANIFEST);
 }
 
-export async function flashStm32Dfu(
+/** Erases every page that overlaps [start, end], walking segment-by-segment
+ * so a page-size change partway through (non-uniform sector chips) is
+ * handled correctly rather than assuming one flat page size. */
+async function eraseRange(
   device: USBDevice,
-  image: FirmwareImage,
-  chip: ChipParams,
-  onProgress?: (progress: FlashProgress) => void,
-): Promise<FlashResult> {
+  interfaceNumber: number,
+  segments: readonly DfuSeSegment[],
+  start: number,
+  end: number,
+  erasedPages: Set<number>,
+): Promise<void> {
+  let cursor = start;
+  while (cursor <= end) {
+    const segment = findSegment(segments, cursor);
+    if (!segment) {
+      throw new Error(`No flash segment covers address 0x${cursor.toString(16)}`);
+    }
+    const pageStart = segment.start + Math.floor((cursor - segment.start) / segment.pageSizeBytes) * segment.pageSizeBytes;
+    if (!erasedPages.has(pageStart)) {
+      await withContext(`Erasing page 0x${pageStart.toString(16)}`, () => runSpecialCommand(device, interfaceNumber, encodeErasePage(pageStart)));
+      erasedPages.add(pageStart);
+    }
+    cursor = pageStart + segment.pageSizeBytes;
+  }
+}
+
+export async function flashStm32Dfu(device: USBDevice, bytes: Uint8Array, onProgress?: (progress: FlashProgress) => void): Promise<FlashResult> {
   const { interfaceNumber } = findDfuInterface(device);
-  const totalBytes = image.bytes.length;
-  const pageSize = chip.pageSizeBytes;
-  const erasedPages = new Set<number>();
+  const { alternateSetting, segments } = await findFlashAlternate(device, interfaceNumber);
+  await device.selectAlternateInterface(interfaceNumber, alternateSetting);
+
+  const flashStart = Math.min(...segments.map((s) => s.start));
+  const flashEnd = Math.max(...segments.map((s) => s.end));
+  const totalFlashSize = flashEnd - flashStart + 1;
+  const totalBytes = bytes.length;
+
+  if (totalBytes > totalFlashSize) {
+    throw new Error(`Firmware (${totalBytes} bytes) is larger than the device's flash (${totalFlashSize} bytes)`);
+  }
 
   await withContext("Checking device state", () => ensureIdle(device, interfaceNumber));
 
+  const erasedPages = new Set<number>();
   for (let offset = 0; offset < totalBytes; offset += DEFAULT_TRANSFER_SIZE) {
-    const address = image.startAddress + offset;
-    const chunk = image.bytes.subarray(offset, Math.min(offset + DEFAULT_TRANSFER_SIZE, totalBytes));
+    const address = flashStart + offset;
+    const chunk = bytes.subarray(offset, Math.min(offset + DEFAULT_TRANSFER_SIZE, totalBytes));
 
-    const firstPage = Math.floor(address / pageSize) * pageSize;
-    const lastPage = Math.floor((address + chunk.length - 1) / pageSize) * pageSize;
-    for (let page = firstPage; page <= lastPage; page += pageSize) {
-      if (!erasedPages.has(page)) {
-        await withContext(`Erasing page 0x${page.toString(16)}`, () => runSpecialCommand(device, interfaceNumber, encodeErasePage(page)));
-        erasedPages.add(page);
-      }
-    }
+    await eraseRange(device, interfaceNumber, segments, address, address + chunk.length - 1, erasedPages);
 
     await withContext(`Setting address 0x${address.toString(16)}`, () => runSpecialCommand(device, interfaceNumber, encodeSetAddress(address)));
     await withContext(`Writing block at 0x${address.toString(16)}`, () => writeBlock(device, interfaceNumber, chunk));
@@ -233,7 +326,7 @@ export async function flashStm32Dfu(
   }
 
   const readback = new Uint8Array(totalBytes);
-  await withContext("Setting address for readback", () => runSpecialCommand(device, interfaceNumber, encodeSetAddress(image.startAddress)));
+  await withContext("Setting address for readback", () => runSpecialCommand(device, interfaceNumber, encodeSetAddress(flashStart)));
   let transaction = DATA_TRANSACTION;
   for (let offset = 0; offset < totalBytes; offset += DEFAULT_TRANSFER_SIZE) {
     const length = Math.min(DEFAULT_TRANSFER_SIZE, totalBytes - offset);
@@ -242,7 +335,7 @@ export async function flashStm32Dfu(
     transaction += 1;
   }
 
-  const verified = verifyFlash(image, readback);
+  const verified = verifyFlash(bytes, readback);
 
   // DFU_UPLOAD leaves the device in dfuUPLOAD-IDLE, which doesn't accept
   // DFU_DNLOAD directly — ABORT first to return to dfuIDLE.

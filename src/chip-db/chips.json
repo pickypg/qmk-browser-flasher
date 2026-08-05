@@ -1,9 +1,0 @@
-{
-  "stm32f072xb": {
-    "name": "STM32F072xB",
-    "flashBaseAddress": 134217728,
-    "flashSizeBytes": 131072,
-    "pageSizeBytes": 2048,
-    "bootloaderStartAddress": 131072
-  }
-}

@@ -1,9 +1,6 @@
-import { getBoard } from "./board-db/index.js";
-import { getChip } from "./chip-db/index.js";
 import { requestUsbDevice } from "./core/device-picker.js";
-import { parseBin } from "./core/firmware-parser/bin.js";
 import { flashStm32Dfu } from "./protocols/stm32-dfu.js";
-import type { FirmwareImage, FlashableDevice } from "./types/index.js";
+import type { FlashableDevice } from "./types/index.js";
 import { createInitialFlowState } from "./ui/flow.js";
 
 function render(): void {
@@ -91,15 +88,11 @@ function wire(app: HTMLDivElement): void {
       return;
     }
 
-    const board = getBoard(device.boardId);
-    const chip = getChip(board.chip);
-    const image: FirmwareImage = parseBin(firmwareBytes, chip.flashBaseAddress);
-
     flashButton.disabled = true;
     result.textContent = "";
     progress.textContent = "Flashing...";
 
-    void flashStm32Dfu(device.device, image, chip, (p) => {
+    void flashStm32Dfu(device.device, firmwareBytes, (p) => {
       progress.textContent = `Flashing... ${p.bytesWritten}/${p.totalBytes} bytes`;
     })
       .then((flashResult) => {

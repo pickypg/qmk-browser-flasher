@@ -46,14 +46,45 @@ per chunk.
 one `DFU_GETSTATUS` triggers `dfuMANIFEST` and a reset into the
 newly-flashed application.
 
-Reference chip data (`stm32f072xb` in `src/chip-db/chips.json`), sourced
-from the locally-checked-out `nuphy-qmk-firmware` repo (a QMK fork,
-GPL-2/3 — data only, no code copied): `platforms/chibios/mcu_selection.mk`
-sets `MCU_LDSCRIPT = STM32F072xB`, and that linker script
-(`lib/chibios/os/common/startup/ARMCMx/compilers/GCC/ld/STM32F072xB.ld`)
-places `flash0` at `0x08000000` with `len = 128k`. The bootloader lives in
-separate ROM (`STM32_BOOTLOADER_ADDRESS = 0x1FFFC800`), so there's no
-bootloader carve-out in flash — the full 128 KB is application-writable.
+### Chip parameters are read live, not stored
+
+Flash base address, total size, and page size are **not** looked up from
+any per-board or per-chip data file. ST's DFU bootloader publishes its
+own memory layout as a USB interface string descriptor, per ST document
+**UM0424** §4.3.2 — e.g. `"@Internal Flash /0x08000000/64*002Kg"` means:
+base address `0x08000000`, `64` pages of `2` `K`ilobytes each, flags `g`
+(readable+erasable+writable, decoded from `charCode & 0x7`). WebUSB
+exposes this directly via `USBAlternateInterface.interfaceName`. Parsing
+implemented in `src/protocols/dfuse-memory-layout.ts`, format verified
+against `dfu-util`'s `src/dfuse_mem.c` (GPL-2.0, **read for the format
+spec only — no code copied**).
+
+**`interfaceName` isn't always populated.** The WebUSB spec only says it
+SHOULD be resolved from the alternate setting's `iInterface` string
+descriptor — confirmed on real hardware (NuPhy Air75 V2, Chrome/macOS)
+that it can come back `null` on both alternates. `findFlashAlternate` in
+`stm32-dfu.ts` falls back to fetching the string manually: a standard
+`GET_DESCRIPTOR(CONFIGURATION)` to find the target alternate's
+`iInterface` index (`src/protocols/usb-descriptors.ts` walks the raw
+TLV-encoded descriptor bytes for this), then
+`GET_DESCRIPTOR(STRING, index, langId)` for the actual string. These are
+standard USB device requests (`requestType: "standard"`), not DFU- or
+vendor-specific, so this works on any USB device regardless of protocol.
+
+This means chip parameters work for *any* genuine ST DFU bootloader
+without a data-entry step per board — confirmed against the NuPhy Air75
+V2's real descriptor string (`64*002Kg`, matching what was previously
+hardcoded from `nuphy-qmk-firmware`'s linker script: 128 KB at
+`0x08000000`, no bootloader carve-out since the bootloader lives in
+separate ROM at `0x1FFFC800`).
+
+It also fixes a real bug the earlier hardcoded-per-board approach had:
+every ST bootloader enumerates under the same generic ID (`0483:DF11`
+below), so a second board's data entry, matched only by that ID, would
+have collided with the first and silently applied the wrong chip's page
+size — a real corruption risk, since flash pages that don't get an
+explicit erase before being written just get ANDed with old contents
+rather than cleanly overwritten.
 
 ## AVR DFU (Atmel/LUFA) — researched, not yet implemented
 

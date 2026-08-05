@@ -1,19 +1,21 @@
-import { boards } from "../board-db/index.js";
 import { findDfuInterface } from "../protocols/stm32-dfu.js";
 import type { FlashableDevice } from "../types/index.js";
 
-const usbBoards = boards.filter(
-  (board): board is typeof board & { usbVendorId: number; usbProductId: number } =>
-    board.usbVendorId !== undefined && board.usbProductId !== undefined,
-);
+/** ST's factory DFU bootloader — every STM32 chip's ROM bootloader
+ * enumerates under this same generic ID, regardless of which board or
+ * chip it actually is (chip identity is read live once paired; see
+ * stm32-dfu.ts). Board-db doesn't help here since it can't disambiguate
+ * boards that share this ID. */
+const STM32_BOOTLOADER_VENDOR_ID = 0x0483;
+const STM32_BOOTLOADER_PRODUCT_ID = 0xdf11;
 
 export async function requestUsbDevice(): Promise<FlashableDevice> {
-  const filters = usbBoards.map((board) => ({ vendorId: board.usbVendorId, productId: board.usbProductId }));
-  const device = await navigator.usb.requestDevice({ filters });
+  const device = await navigator.usb.requestDevice({
+    filters: [{ vendorId: STM32_BOOTLOADER_VENDOR_ID, productId: STM32_BOOTLOADER_PRODUCT_ID }],
+  });
 
-  const board = usbBoards.find((b) => b.usbVendorId === device.vendorId && b.usbProductId === device.productId);
-  if (!board) {
-    throw new Error(`Unrecognized USB device: ${device.vendorId.toString(16)}:${device.productId.toString(16)}`);
+  if (device.vendorId !== STM32_BOOTLOADER_VENDOR_ID || device.productId !== STM32_BOOTLOADER_PRODUCT_ID) {
+    throw new Error(`Unsupported USB device: ${device.vendorId.toString(16)}:${device.productId.toString(16)}`);
   }
 
   await device.open();
@@ -29,9 +31,8 @@ export async function requestUsbDevice(): Promise<FlashableDevice> {
 
   return {
     transport: "usb",
-    protocol: board.protocol,
-    productName: device.productName ?? board.name,
-    boardId: board.id,
+    protocol: "stm32-dfu",
+    productName: device.productName ?? "STM32 DFU bootloader",
     device,
   };
 }

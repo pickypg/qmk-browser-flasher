@@ -3,9 +3,16 @@
     "id": "nuphy-air75-v2",
     "name": "NuPhy Air75 V2",
     "protocol": "stm32-dfu",
-    "chip": "stm32f072xb",
     "usbVendorId": 1155,
     "usbProductId": 57105,
     "bootloaderEntry": { "kind": "magic-key", "key": "Esc" }
+  },
+  {
+    "id": "keychron-k1-pro",
+    "name": "Keychron K1 Pro",
+    "protocol": "stm32-dfu",
+    "usbVendorId": 1155,
+    "usbProductId": 57105,
+    "bootloaderEntry": { "kind": "reset-button" }
   }
 ]
