@@ -36,9 +36,26 @@ export interface FirmwareImage {
   readonly startAddress: number;
 }
 
-export interface FlashProgress {
-  readonly bytesWritten: number;
-  readonly totalBytes: number;
+export type FlashPhase = "preparing" | "erasing" | "writing" | "verifying" | "finishing";
+
+/**
+ * "progress" events are frequent (e.g. once per transfer chunk) and only
+ * carry current/total for bar animation. "start"/"ok"/"error" are sparse,
+ * one per named operation, and are what a step log should render as rows.
+ */
+export interface FlashStepEvent {
+  readonly phase: FlashPhase;
+  /** Stable identity/display text for the operation — constant across a
+   * phase's start/progress/ok/error events (e.g. "Erasing flash"). */
+  readonly label: string;
+  readonly status: "start" | "progress" | "ok" | "error";
+  readonly current?: number;
+  readonly total?: number;
+  /** Transient, more specific description of what's happening right now
+   * within the phase (e.g. "Erasing page 0x8000800") — for a live activity
+   * indicator, not for identifying the row a step log should update. */
+  readonly detail?: string;
+  readonly error?: string;
 }
 
 export interface FlashResult {

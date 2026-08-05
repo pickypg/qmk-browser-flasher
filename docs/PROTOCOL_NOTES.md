@@ -86,6 +86,24 @@ size — a real corruption risk, since flash pages that don't get an
 explicit erase before being written just get ANDed with old contents
 rather than cleanly overwritten.
 
+### Progress reporting: phase-based step events, not a flat byte count
+
+`flashStm32Dfu`'s optional callback takes a `FlashStepEvent` (see
+`src/types/index.ts`), not a bare `{bytesWritten, totalBytes}` pair: each
+event carries a `phase` (`preparing`/`erasing`/`writing`/`verifying`/
+`finishing`), a human-readable `label`, and a `status` of `start`/
+`progress`/`ok`/`error`. `current`/`total` are present when there's a
+meaningful count for that step (pages erased, bytes written/read) and
+absent for one-shot steps (checking device state, leaving DFU mode) — the
+UI treats the latter as indeterminate rather than assuming 0%. `status:
+"progress"` fires once per transfer chunk purely to animate a progress
+bar; `start`/`ok`/`error` are sparse (one pair per named operation, e.g.
+one row per erased page, one for the whole write phase) and are what a
+step-log UI should render as rows. The still-stub protocols
+(`avr-dfu.ts`, `halfkay.ts`, `caterina.ts`, `uf2-picoboot.ts`) share this
+same `onStep` contract in their signatures for whenever they're
+implemented.
+
 ## AVR DFU (Atmel/LUFA) — researched, not yet implemented
 
 Target: `src/protocols/avr-dfu.ts` (still a stub). Priority P0 per

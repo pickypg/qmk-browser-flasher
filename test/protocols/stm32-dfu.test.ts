@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { encodeErasePage, encodeMassErase, encodeSetAddress, flashStm32Dfu } from "../../src/protocols/stm32-dfu.js";
+import { parseDfuSeMemoryLayout } from "../../src/protocols/dfuse-memory-layout.js";
+import { encodeErasePage, encodeMassErase, encodeSetAddress, flashStm32Dfu, planErasePages } from "../../src/protocols/stm32-dfu.js";
+import type { FlashStepEvent } from "../../src/types/index.js";
 
 const DFU_DNLOAD = 1;
 const DFU_UPLOAD = 2;
@@ -185,6 +187,70 @@ describe("flashStm32Dfu", () => {
     const bytes = new Uint8Array(FLASH_SIZE + 1);
 
     await expect(flashStm32Dfu(device as unknown as USBDevice, bytes)).rejects.toThrow(/larger than/);
+  });
+
+  it("reports phase-ordered step events, one row's worth of start/ok per phase with live progress in between", async () => {
+    const bytes = new Uint8Array(PAGE_SIZE + 16); // spans 2 pages
+    const events: FlashStepEvent[] = [];
+
+    await flashStm32Dfu(device as unknown as USBDevice, bytes, (event) => events.push(event));
+
+    const firstIndexOf = (phase: FlashStepEvent["phase"]) => events.findIndex((e) => e.phase === phase);
+    expect(firstIndexOf("preparing")).toBeLessThan(firstIndexOf("erasing"));
+    expect(firstIndexOf("erasing")).toBeLessThan(firstIndexOf("writing"));
+    expect(firstIndexOf("writing")).toBeLessThan(firstIndexOf("verifying"));
+    expect(firstIndexOf("verifying")).toBeLessThan(firstIndexOf("finishing"));
+
+    const preparingEvents = events.filter((e) => e.phase === "preparing");
+    expect(preparingEvents.every((e) => e.current === undefined && e.total === undefined)).toBe(true);
+
+    // Exactly one start/ok pair for the whole erase phase, no matter how
+    // many pages it erases underneath — the per-page detail lives in the
+    // "progress" events instead, for the live activity indicator.
+    expect(events.filter((e) => e.phase === "erasing" && (e.status === "start" || e.status === "ok"))).toHaveLength(2);
+    const erasingProgress = events.filter((e) => e.phase === "erasing" && e.status === "progress");
+    expect(erasingProgress.map((e) => ({ current: e.current, total: e.total }))).toEqual([
+      { current: 1, total: 2 },
+      { current: 2, total: 2 },
+    ]);
+    expect(erasingProgress.every((e) => e.detail?.startsWith("Erasing page 0x"))).toBe(true);
+
+    const writingProgress = events.filter((e) => e.phase === "writing" && e.status === "progress");
+    expect(writingProgress.at(-1)).toMatchObject({ current: bytes.length, total: bytes.length });
+
+    const verifyingProgress = events.filter((e) => e.phase === "verifying" && e.status === "progress");
+    expect(verifyingProgress.at(-1)).toMatchObject({ current: bytes.length, total: bytes.length });
+
+    const finishingEvents = events.filter((e) => e.phase === "finishing");
+    expect(finishingEvents.every((e) => e.current === undefined && e.total === undefined)).toBe(true);
+  });
+
+  it("reports a verifying error event when the readback does not match, without throwing away the finishing steps", async () => {
+    device.corruptReadback = true;
+    const bytes = new Uint8Array(64).fill(0xaa);
+    const events: FlashStepEvent[] = [];
+
+    await flashStm32Dfu(device as unknown as USBDevice, bytes, (event) => events.push(event));
+
+    const verifyingError = events.find((e) => e.phase === "verifying" && e.status === "error");
+    expect(verifyingError?.error).toMatch(/did not match/);
+    expect(events.some((e) => e.phase === "finishing" && e.label === "Leaving DFU mode" && e.status === "ok")).toBe(true);
+  });
+});
+
+describe("planErasePages", () => {
+  const segments = parseDfuSeMemoryLayout(`@Internal Flash /0x${FLASH_BASE.toString(16)}/2*002Kg`);
+
+  it("returns a single page for a range within it", () => {
+    expect(planErasePages(segments, FLASH_BASE, FLASH_BASE + 63)).toEqual([FLASH_BASE]);
+  });
+
+  it("returns every distinct page a range spans, in ascending order", () => {
+    expect(planErasePages(segments, FLASH_BASE, FLASH_BASE + PAGE_SIZE + 15)).toEqual([FLASH_BASE, FLASH_BASE + PAGE_SIZE]);
+  });
+
+  it("throws when the range extends past the described segments", () => {
+    expect(() => planErasePages(segments, FLASH_BASE, FLASH_BASE + FLASH_SIZE)).toThrow(/No flash segment covers/);
   });
 });
 

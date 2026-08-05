@@ -9,7 +9,7 @@
     "module": "esnext",
     "target": "es2022",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["w3c-web-usb", "w3c-web-hid", "w3c-web-serial", "vitest/globals"],
+    "types": ["w3c-web-usb", "w3c-web-hid", "w3c-web-serial", "vitest/globals", "vite/client"],
 
     // Other Outputs
     "sourceMap": true,

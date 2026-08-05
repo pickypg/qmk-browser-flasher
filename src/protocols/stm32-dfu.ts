@@ -1,5 +1,5 @@
 import { verifyFlash } from "../core/verify.js";
-import type { FlashProgress, FlashResult } from "../types/index.js";
+import type { FlashPhase, FlashResult, FlashStepEvent } from "../types/index.js";
 import { type DfuSeSegment, findSegment, parseDfuSeMemoryLayout } from "./dfuse-memory-layout.js";
 import { findInterfaceStringIndex, getConfigurationDescriptor, getDefaultLangId, getStringDescriptor } from "./usb-descriptors.js";
 
@@ -270,17 +270,14 @@ async function leaveDfuMode(device: USBDevice, interfaceNumber: number): Promise
   } while (status.state !== STATE_DFU_DNLOAD_IDLE && status.state !== STATE_DFU_ERROR && status.state !== STATE_DFU_MANIFEST);
 }
 
-/** Erases every page that overlaps [start, end], walking segment-by-segment
- * so a page-size change partway through (non-uniform sector chips) is
- * handled correctly rather than assuming one flat page size. */
-async function eraseRange(
-  device: USBDevice,
-  interfaceNumber: number,
-  segments: readonly DfuSeSegment[],
-  start: number,
-  end: number,
-  erasedPages: Set<number>,
-): Promise<void> {
+/** Returns every distinct page-start address that overlaps [start, end],
+ * walking segment-by-segment so a page-size change partway through
+ * (non-uniform sector chips) is handled correctly rather than assuming one
+ * flat page size. Pure and side-effect-free so the total page count is
+ * known before any erase command is sent. */
+export function planErasePages(segments: readonly DfuSeSegment[], start: number, end: number): number[] {
+  const pages: number[] = [];
+  const seen = new Set<number>();
   let cursor = start;
   while (cursor <= end) {
     const segment = findSegment(segments, cursor);
@@ -288,15 +285,34 @@ async function eraseRange(
       throw new Error(`No flash segment covers address 0x${cursor.toString(16)}`);
     }
     const pageStart = segment.start + Math.floor((cursor - segment.start) / segment.pageSizeBytes) * segment.pageSizeBytes;
-    if (!erasedPages.has(pageStart)) {
-      await withContext(`Erasing page 0x${pageStart.toString(16)}`, () => runSpecialCommand(device, interfaceNumber, encodeErasePage(pageStart)));
-      erasedPages.add(pageStart);
+    if (!seen.has(pageStart)) {
+      seen.add(pageStart);
+      pages.push(pageStart);
     }
     cursor = pageStart + segment.pageSizeBytes;
   }
+  return pages;
 }
 
-export async function flashStm32Dfu(device: USBDevice, bytes: Uint8Array, onProgress?: (progress: FlashProgress) => void): Promise<FlashResult> {
+/** Runs one named operation, reporting its start/ok/error as a
+ * FlashStepEvent around it. Multi-step operations (erase/write/verify)
+ * report their own "progress" events with live current/total from inside
+ * `fn` — this only brackets the overall start/ok/error, so a step log can
+ * render one row per named operation regardless of how many device
+ * round-trips it takes underneath. */
+async function runPhaseStep<T>(onStep: ((event: FlashStepEvent) => void) | undefined, phase: FlashPhase, label: string, fn: () => Promise<T>): Promise<T> {
+  onStep?.({ phase, label, status: "start" });
+  try {
+    const result = await fn();
+    onStep?.({ phase, label, status: "ok" });
+    return result;
+  } catch (error) {
+    onStep?.({ phase, label, status: "error", error: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
+}
+
+export async function flashStm32Dfu(device: USBDevice, bytes: Uint8Array, onStep?: (event: FlashStepEvent) => void): Promise<FlashResult> {
   const { interfaceNumber } = findDfuInterface(device);
   const { alternateSetting, segments } = await findFlashAlternate(device, interfaceNumber);
   await device.selectAlternateInterface(interfaceNumber, alternateSetting);
@@ -310,42 +326,68 @@ export async function flashStm32Dfu(device: USBDevice, bytes: Uint8Array, onProg
     throw new Error(`Firmware (${totalBytes} bytes) is larger than the device's flash (${totalFlashSize} bytes)`);
   }
 
-  await withContext("Checking device state", () => ensureIdle(device, interfaceNumber));
+  await runPhaseStep(onStep, "preparing", "Checking device state", () => withContext("Checking device state", () => ensureIdle(device, interfaceNumber)));
 
-  const erasedPages = new Set<number>();
-  for (let offset = 0; offset < totalBytes; offset += DEFAULT_TRANSFER_SIZE) {
-    const address = flashStart + offset;
-    const chunk = bytes.subarray(offset, Math.min(offset + DEFAULT_TRANSFER_SIZE, totalBytes));
+  const pages = planErasePages(segments, flashStart, flashStart + totalBytes - 1);
+  await runPhaseStep(onStep, "erasing", "Erasing flash", async () => {
+    for (let i = 0; i < pages.length; i++) {
+      const pageStart = pages[i]!;
+      const pageLabel = `Erasing page 0x${pageStart.toString(16)}`;
+      await withContext(pageLabel, () => runSpecialCommand(device, interfaceNumber, encodeErasePage(pageStart)));
+      onStep?.({ phase: "erasing", label: "Erasing flash", status: "progress", current: i + 1, total: pages.length, detail: pageLabel });
+    }
+  });
 
-    await eraseRange(device, interfaceNumber, segments, address, address + chunk.length - 1, erasedPages);
+  await runPhaseStep(onStep, "writing", "Writing firmware", async () => {
+    for (let offset = 0; offset < totalBytes; offset += DEFAULT_TRANSFER_SIZE) {
+      const address = flashStart + offset;
+      const chunk = bytes.subarray(offset, Math.min(offset + DEFAULT_TRANSFER_SIZE, totalBytes));
+      const writeLabel = `Writing block at 0x${address.toString(16)}`;
 
-    await withContext(`Setting address 0x${address.toString(16)}`, () => runSpecialCommand(device, interfaceNumber, encodeSetAddress(address)));
-    await withContext(`Writing block at 0x${address.toString(16)}`, () => writeBlock(device, interfaceNumber, chunk));
+      await withContext(`Setting address 0x${address.toString(16)}`, () => runSpecialCommand(device, interfaceNumber, encodeSetAddress(address)));
+      await withContext(writeLabel, () => writeBlock(device, interfaceNumber, chunk));
 
-    onProgress?.({ bytesWritten: offset + chunk.length, totalBytes });
-  }
+      onStep?.({ phase: "writing", label: "Writing firmware", status: "progress", current: offset + chunk.length, total: totalBytes, detail: writeLabel });
+    }
+  });
 
   const readback = new Uint8Array(totalBytes);
-  await withContext("Setting address for readback", () => runSpecialCommand(device, interfaceNumber, encodeSetAddress(flashStart)));
-  let transaction = DATA_TRANSACTION;
-  for (let offset = 0; offset < totalBytes; offset += DEFAULT_TRANSFER_SIZE) {
-    const length = Math.min(DEFAULT_TRANSFER_SIZE, totalBytes - offset);
-    const block = await withContext(`Reading block at offset 0x${offset.toString(16)}`, () => dfuUpload(device, interfaceNumber, transaction, length));
-    readback.set(block, offset);
-    transaction += 1;
-  }
+  await runPhaseStep(onStep, "verifying", "Verifying firmware", async () => {
+    await withContext("Setting address for readback", () => runSpecialCommand(device, interfaceNumber, encodeSetAddress(flashStart)));
+    let transaction = DATA_TRANSACTION;
+    for (let offset = 0; offset < totalBytes; offset += DEFAULT_TRANSFER_SIZE) {
+      const length = Math.min(DEFAULT_TRANSFER_SIZE, totalBytes - offset);
+      const readLabel = `Reading block at offset 0x${offset.toString(16)}`;
+      const block = await withContext(readLabel, () => dfuUpload(device, interfaceNumber, transaction, length));
+      readback.set(block, offset);
+      transaction += 1;
+      onStep?.({ phase: "verifying", label: "Verifying firmware", status: "progress", current: offset + length, total: totalBytes, detail: readLabel });
+    }
+  });
 
   const verified = verifyFlash(bytes, readback);
+  if (!verified) {
+    onStep?.({
+      phase: "verifying",
+      label: "Verifying firmware",
+      status: "error",
+      current: totalBytes,
+      total: totalBytes,
+      error: "Readback did not match what was written",
+    });
+  }
 
   // DFU_UPLOAD leaves the device in dfuUPLOAD-IDLE, which doesn't accept
   // DFU_DNLOAD directly — ABORT first to return to dfuIDLE.
-  await withContext("Returning to dfuIDLE after readback", () => dfuAbort(device, interfaceNumber));
+  await runPhaseStep(onStep, "finishing", "Returning to dfuIDLE after readback", () =>
+    withContext("Returning to dfuIDLE after readback", () => dfuAbort(device, interfaceNumber)),
+  );
 
   // The flash write is already done and verified above; failing to leave
   // DFU mode (e.g. the device resets mid-handshake) shouldn't overwrite
   // that result with a false failure.
   try {
-    await leaveDfuMode(device, interfaceNumber);
+    await runPhaseStep(onStep, "finishing", "Leaving DFU mode", () => leaveDfuMode(device, interfaceNumber));
   } catch {
     // Best-effort: the user can still power-cycle the board manually.
   }
