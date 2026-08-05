@@ -5,7 +5,12 @@ keyboard's microcontroller using WebUSB/WebHID, without a native app like QMK
 Toolbox. Chromium-based browsers only (Chrome/Edge/Brave) — see
 [`plan.md`](plan.md) for full scope, architecture, and milestones.
 
-**Status**: M0 — repo scaffold. No protocol is implemented yet.
+**Status**: STM32 DfuSe boards (e.g. NuPhy Air75 V2) can be flashed
+end-to-end, verified on real hardware — see
+[`docs/SUPPORTED_BOARDS.md`](docs/SUPPORTED_BOARDS.md) for what's been
+tested and [`docs/SAFETY.md`](docs/SAFETY.md) for bricking risk and
+recovery. HalfKay/Teensy, Caterina/AVR109, and UF2/RP2040 support are
+planned but blocked on hardware to test against (see `plan.md` §7).
 
 ## Development
 

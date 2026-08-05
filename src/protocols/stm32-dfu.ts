@@ -312,6 +312,29 @@ async function runPhaseStep<T>(onStep: ((event: FlashStepEvent) => void) | undef
   }
 }
 
+/** Erases every page covering [start, end] not already in `erasedPages`
+ * (via `planErasePages`), executing each erase immediately rather than
+ * just planning it — `onPageErased` fires right after each one so the
+ * caller can report progress as it actually happens. */
+async function eraseChunkRange(
+  device: USBDevice,
+  interfaceNumber: number,
+  segments: readonly DfuSeSegment[],
+  start: number,
+  end: number,
+  erasedPages: Set<number>,
+  onPageErased: (pageStart: number) => void,
+): Promise<void> {
+  for (const pageStart of planErasePages(segments, start, end)) {
+    if (!erasedPages.has(pageStart)) {
+      const pageLabel = `Erasing page 0x${pageStart.toString(16)}`;
+      await withContext(pageLabel, () => runSpecialCommand(device, interfaceNumber, encodeErasePage(pageStart)));
+      erasedPages.add(pageStart);
+      onPageErased(pageStart);
+    }
+  }
+}
+
 export async function flashStm32Dfu(device: USBDevice, bytes: Uint8Array, onStep?: (event: FlashStepEvent) => void): Promise<FlashResult> {
   const { interfaceNumber } = findDfuInterface(device);
   const { alternateSetting, segments } = await findFlashAlternate(device, interfaceNumber);
@@ -328,28 +351,46 @@ export async function flashStm32Dfu(device: USBDevice, bytes: Uint8Array, onStep
 
   await runPhaseStep(onStep, "preparing", "Checking device state", () => withContext("Checking device state", () => ensureIdle(device, interfaceNumber)));
 
-  const pages = planErasePages(segments, flashStart, flashStart + totalBytes - 1);
-  await runPhaseStep(onStep, "erasing", "Erasing flash", async () => {
-    for (let i = 0; i < pages.length; i++) {
-      const pageStart = pages[i]!;
-      const pageLabel = `Erasing page 0x${pageStart.toString(16)}`;
-      await withContext(pageLabel, () => runSpecialCommand(device, interfaceNumber, encodeErasePage(pageStart)));
-      onStep?.({ phase: "erasing", label: "Erasing flash", status: "progress", current: i + 1, total: pages.length, detail: pageLabel });
-    }
-  });
+  // Erase and write are interleaved per chunk — each page gets its new
+  // contents written immediately after it's erased, rather than erasing
+  // every page the image needs before writing any of them. A page sitting
+  // erased-but-not-yet-rewritten is the one state a mid-flash interruption
+  // can't recover from in software (see docs/SAFETY.md): if that page
+  // holds the vector table or early boot code, whatever normally triggers
+  // re-entering DFU mode (e.g. a magic-key check) may no longer be there
+  // to run. Interleaving keeps that window to at most one chunk instead of
+  // the whole image. Reported as a single "flashing" phase/step (not
+  // separate erase/write ones) since the two now always happen together —
+  // treating them as independent phases was a holdover from when erasing
+  // ran as its own pass, and it made the progress bar's phase label flip
+  // on every chunk. Progress is tracked by bytes written; which page is
+  // currently being erased (if any) shows up in `detail` instead of as
+  // its own counted total.
+  const label = "Flashing firmware";
+  const erasedPages = new Set<number>();
 
-  await runPhaseStep(onStep, "writing", "Writing firmware", async () => {
+  onStep?.({ phase: "flashing", label, status: "start", current: 0, total: totalBytes });
+
+  try {
     for (let offset = 0; offset < totalBytes; offset += DEFAULT_TRANSFER_SIZE) {
       const address = flashStart + offset;
       const chunk = bytes.subarray(offset, Math.min(offset + DEFAULT_TRANSFER_SIZE, totalBytes));
-      const writeLabel = `Writing block at 0x${address.toString(16)}`;
 
+      await eraseChunkRange(device, interfaceNumber, segments, address, address + chunk.length - 1, erasedPages, (pageStart) => {
+        onStep?.({ phase: "flashing", label, status: "progress", current: offset, total: totalBytes, detail: `Erasing page 0x${pageStart.toString(16)}` });
+      });
+
+      const writeLabel = `Writing block at 0x${address.toString(16)}`;
       await withContext(`Setting address 0x${address.toString(16)}`, () => runSpecialCommand(device, interfaceNumber, encodeSetAddress(address)));
       await withContext(writeLabel, () => writeBlock(device, interfaceNumber, chunk));
-
-      onStep?.({ phase: "writing", label: "Writing firmware", status: "progress", current: offset + chunk.length, total: totalBytes, detail: writeLabel });
+      onStep?.({ phase: "flashing", label, status: "progress", current: offset + chunk.length, total: totalBytes, detail: writeLabel });
     }
-  });
+
+    onStep?.({ phase: "flashing", label, status: "ok", current: totalBytes, total: totalBytes });
+  } catch (error) {
+    onStep?.({ phase: "flashing", label, status: "error", error: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
 
   const readback = new Uint8Array(totalBytes);
   await runPhaseStep(onStep, "verifying", "Verifying firmware", async () => {

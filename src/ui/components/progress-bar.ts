@@ -2,8 +2,7 @@ import type { FlashPhase, FlashStepEvent } from "../../types/index.js";
 
 const PHASE_LABELS: Record<FlashPhase, string> = {
   preparing: "Preparing",
-  erasing: "Erasing",
-  writing: "Writing",
+  flashing: "Flashing",
   verifying: "Verifying",
   finishing: "Finishing",
 };

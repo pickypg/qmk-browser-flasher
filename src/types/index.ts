@@ -36,7 +36,7 @@ export interface FirmwareImage {
   readonly startAddress: number;
 }
 
-export type FlashPhase = "preparing" | "erasing" | "writing" | "verifying" | "finishing";
+export type FlashPhase = "preparing" | "flashing" | "verifying" | "finishing";
 
 /**
  * "progress" events are frequent (e.g. once per transfer chunk) and only

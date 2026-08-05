@@ -37,6 +37,20 @@ export async function requestUsbDevice(): Promise<FlashableDevice> {
   };
 }
 
+/** Watches for `device` disconnecting (e.g. unplugged) and calls
+ * `onDisconnect` once if it does; returns an unsubscribe function. Takes
+ * `usb` explicitly (rather than reaching for `navigator.usb` internally)
+ * so this is unit-testable with a plain EventTarget. */
+export function watchForDisconnect(usb: USB, device: USBDevice, onDisconnect: () => void): () => void {
+  const handler = (event: USBConnectionEvent): void => {
+    if (event.device === device) {
+      onDisconnect();
+    }
+  };
+  usb.addEventListener("disconnect", handler);
+  return () => usb.removeEventListener("disconnect", handler);
+}
+
 // TODO(M2): wrap navigator.hid.requestDevice() for HalfKay-class boards.
 export function requestHidDevice(): Promise<FlashableDevice> {
   return Promise.reject(new Error("Not implemented"));

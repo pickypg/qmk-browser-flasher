@@ -9,6 +9,10 @@ const DFU_UPLOAD = 2;
 const DFU_GETSTATUS = 3;
 const DFU_ABORT = 6;
 
+/** Fixed transaction number stm32-dfu.ts uses for data blocks (mirrors its
+ * internal DATA_TRANSACTION, not exported). */
+const DATA_TRANSACTION = 2;
+
 const STATE_DFU_IDLE = 2;
 const STATE_DFU_DNBUSY = 4;
 const STATE_DFU_DNLOAD_IDLE = 5;
@@ -36,6 +40,11 @@ class MockDfuDevice {
   private state = STATE_DFU_IDLE;
   private lastSetAddress = FLASH_BASE;
   corruptReadback = false;
+  /** When true, the next DFU_DNLOAD stalls instead of succeeding — for
+   * simulating a mid-flash protocol failure (a stall is what a real
+   * disconnect/bus error surfaces as, per the real-hardware testing that
+   * found this). Cleared automatically after firing once. */
+  failNextDownload = false;
   readonly configuration = {
     interfaces: [
       {
@@ -63,6 +72,11 @@ class MockDfuDevice {
   controlTransferOut(setup: USBControlTransferParameters, data?: BufferSource): Promise<USBOutTransferResult> {
     const bytes = data ? Array.from(new Uint8Array(data as ArrayBuffer)) : undefined;
     this.commands.push({ request: setup.request, value: setup.value, bytes });
+
+    if (setup.request === DFU_DNLOAD && this.failNextDownload) {
+      this.failNextDownload = false;
+      return Promise.resolve({ status: "stall", bytesWritten: 0 });
+    }
 
     if (setup.request === DFU_DNLOAD) {
       if (setup.value === 0 && bytes) {
@@ -196,33 +210,64 @@ describe("flashStm32Dfu", () => {
     await flashStm32Dfu(device as unknown as USBDevice, bytes, (event) => events.push(event));
 
     const firstIndexOf = (phase: FlashStepEvent["phase"]) => events.findIndex((e) => e.phase === phase);
-    expect(firstIndexOf("preparing")).toBeLessThan(firstIndexOf("erasing"));
-    expect(firstIndexOf("erasing")).toBeLessThan(firstIndexOf("writing"));
-    expect(firstIndexOf("writing")).toBeLessThan(firstIndexOf("verifying"));
+    expect(firstIndexOf("preparing")).toBeLessThan(firstIndexOf("flashing"));
+    expect(firstIndexOf("flashing")).toBeLessThan(firstIndexOf("verifying"));
     expect(firstIndexOf("verifying")).toBeLessThan(firstIndexOf("finishing"));
 
     const preparingEvents = events.filter((e) => e.phase === "preparing");
     expect(preparingEvents.every((e) => e.current === undefined && e.total === undefined)).toBe(true);
 
-    // Exactly one start/ok pair for the whole erase phase, no matter how
-    // many pages it erases underneath — the per-page detail lives in the
-    // "progress" events instead, for the live activity indicator.
-    expect(events.filter((e) => e.phase === "erasing" && (e.status === "start" || e.status === "ok"))).toHaveLength(2);
-    const erasingProgress = events.filter((e) => e.phase === "erasing" && e.status === "progress");
-    expect(erasingProgress.map((e) => ({ current: e.current, total: e.total }))).toEqual([
-      { current: 1, total: 2 },
-      { current: 2, total: 2 },
-    ]);
-    expect(erasingProgress.every((e) => e.detail?.startsWith("Erasing page 0x"))).toBe(true);
+    // Exactly one start/ok pair for the whole combined erase+write phase,
+    // no matter how many pages/chunks it takes underneath — erase and
+    // write are reported as a single "flashing" step since they always
+    // run together now, so the progress bar's phase label doesn't flip
+    // between "Erasing"/"Writing" on every chunk.
+    expect(events.filter((e) => e.phase === "flashing" && (e.status === "start" || e.status === "ok"))).toHaveLength(2);
 
-    const writingProgress = events.filter((e) => e.phase === "writing" && e.status === "progress");
-    expect(writingProgress.at(-1)).toMatchObject({ current: bytes.length, total: bytes.length });
+    const flashingProgress = events.filter((e) => e.phase === "flashing" && e.status === "progress");
+    const eraseProgress = flashingProgress.filter((e) => e.detail?.startsWith("Erasing page 0x"));
+    const writeProgress = flashingProgress.filter((e) => e.detail?.startsWith("Writing block at 0x"));
+    expect(eraseProgress).toHaveLength(2); // one per page
+    expect(writeProgress).toHaveLength(2); // one per chunk
+    expect(writeProgress.at(-1)).toMatchObject({ current: bytes.length, total: bytes.length });
 
     const verifyingProgress = events.filter((e) => e.phase === "verifying" && e.status === "progress");
     expect(verifyingProgress.at(-1)).toMatchObject({ current: bytes.length, total: bytes.length });
 
     const finishingEvents = events.filter((e) => e.phase === "finishing");
     expect(finishingEvents.every((e) => e.current === undefined && e.total === undefined)).toBe(true);
+  });
+
+  it("interleaves erase and write per chunk, so an interruption never leaves many pages erased before any are rewritten", async () => {
+    const bytes = new Uint8Array(PAGE_SIZE + 16); // spans 2 pages / 2 chunks
+
+    await flashStm32Dfu(device as unknown as USBDevice, bytes);
+
+    const eraseIndices = device.commands
+      .map((command, index) => ({ command, index }))
+      .filter(({ command }) => command.request === DFU_DNLOAD && command.value === 0 && command.bytes?.[0] === 0x41)
+      .map(({ index }) => index);
+    const firstWriteIndex = device.commands.findIndex(
+      (command) => command.request === DFU_DNLOAD && command.value === DATA_TRANSACTION && (command.bytes?.length ?? 0) > 0,
+    );
+
+    expect(eraseIndices).toHaveLength(2);
+    // The first chunk's write happens before the second page even gets
+    // erased — i.e. each page's replacement is written right away, not
+    // after every page in the image has already been wiped.
+    expect(firstWriteIndex).toBeGreaterThan(eraseIndices[0]!);
+    expect(firstWriteIndex).toBeLessThan(eraseIndices[1]!);
+  });
+
+  it("resolves the flashing step to error (not stuck 'Running…') when the very first erase fails", async () => {
+    const bytes = new Uint8Array(64);
+    device.failNextDownload = true;
+    const events: FlashStepEvent[] = [];
+
+    await expect(flashStm32Dfu(device as unknown as USBDevice, bytes, (event) => events.push(event))).rejects.toThrow(/stall/);
+
+    const flashingError = events.find((e) => e.phase === "flashing" && e.status === "error");
+    expect(flashingError?.error).toMatch(/stall/);
   });
 
   it("reports a verifying error event when the readback does not match, without throwing away the finishing steps", async () => {
@@ -251,6 +296,32 @@ describe("planErasePages", () => {
 
   it("throws when the range extends past the described segments", () => {
     expect(() => planErasePages(segments, FLASH_BASE, FLASH_BASE + FLASH_SIZE)).toThrow(/No flash segment covers/);
+  });
+
+  it("handles a range crossing a non-uniform sector-size boundary (synthetic STM32F4-style)", () => {
+    // 4 * 16KB, then 1 * 64KB, then 7 * 128KB — same shape exercised in
+    // dfuse-memory-layout.test.ts. "Wider chip-parameter coverage" here
+    // means logic-verified against this shape, not hardware-verified —
+    // no F4-family board has been tested against this project yet.
+    const nonUniform = parseDfuSeMemoryLayout(`@Internal Flash /0x${FLASH_BASE.toString(16)}/04*016Kg,01*064Kg,07*128Kg`);
+    const sixteenKb = 16 * 1024;
+    const sixtyFourKb = 64 * 1024;
+
+    // A range spanning all four 16KB sectors plus a few bytes into the
+    // single 64KB sector immediately after them.
+    const pages = planErasePages(nonUniform, FLASH_BASE, FLASH_BASE + 4 * sixteenKb + 16);
+
+    expect(pages).toEqual([
+      FLASH_BASE,
+      FLASH_BASE + sixteenKb,
+      FLASH_BASE + 2 * sixteenKb,
+      FLASH_BASE + 3 * sixteenKb,
+      FLASH_BASE + 4 * sixteenKb,
+    ]);
+    expect(pages).toHaveLength(5);
+    // Confirms the differently-sized page was picked up correctly, not
+    // just another 16KB page reused past the boundary.
+    expect(nonUniform.find((s) => s.start === pages[4])?.pageSizeBytes).toBe(sixtyFourKb);
   });
 });
 

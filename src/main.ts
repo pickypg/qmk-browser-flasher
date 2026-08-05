@@ -1,8 +1,9 @@
-import { requestUsbDevice } from "./core/device-picker.js";
+import { requestUsbDevice, watchForDisconnect } from "./core/device-picker.js";
 import { flashStm32Dfu } from "./protocols/stm32-dfu.js";
 import "./styles.css";
 import type { FlashableDevice, FlashStepEvent } from "./types/index.js";
 import { wireDropzone } from "./ui/components/dropzone.js";
+import { renderErrorScreen } from "./ui/components/error-screen.js";
 import { renderPicker } from "./ui/components/picker.js";
 import { renderProgress } from "./ui/components/progress-bar.js";
 import { appendOrUpdateStepRow, resetStepLog } from "./ui/components/step-log.js";
@@ -85,7 +86,7 @@ function render(): void {
       </section>
 
       <section class="panel" data-role="result-panel" hidden>
-        <p class="result-text" data-role="result"></p>
+        <div data-role="result-content"></div>
         <button type="button" id="reset-button">Flash another firmware</button>
       </section>
     </div>
@@ -110,11 +111,20 @@ function wire(app: HTMLDivElement): void {
   const progressContainer = app.querySelector<HTMLDivElement>('[data-role="progress-container"]')!;
   const stepLogBody = app.querySelector<HTMLTableSectionElement>('[data-role="step-log-body"]')!;
   const resultPanel = app.querySelector<HTMLElement>('[data-role="result-panel"]')!;
-  const resultText = app.querySelector<HTMLParagraphElement>('[data-role="result"]')!;
+  const resultContent = app.querySelector<HTMLDivElement>('[data-role="result-content"]')!;
   const resetButton = app.querySelector<HTMLButtonElement>("#reset-button")!;
 
   let firmwareBytes: Uint8Array | null = null;
   let device: FlashableDevice | null = null;
+  let unwatchDisconnect: (() => void) | null = null;
+
+  function handleDeviceDisconnected(): void {
+    device = null;
+    deviceInfo.textContent = "Device disconnected — pair again to continue.";
+    unwatchDisconnect?.();
+    unwatchDisconnect = null;
+    updateFlashButtonState();
+  }
 
   function updateStatus(step: FlowStep): void {
     statusLine.textContent = STEP_LABELS[step];
@@ -155,8 +165,10 @@ function wire(app: HTMLDivElement): void {
   pairButton.addEventListener("click", () => {
     void requestUsbDevice()
       .then((paired) => {
+        unwatchDisconnect?.();
         device = paired;
         deviceInfo.textContent = `Paired: ${paired.productName}`;
+        unwatchDisconnect = paired.transport === "usb" ? watchForDisconnect(navigator.usb, paired.device, handleDeviceDisconnected) : null;
         updateFlashButtonState();
       })
       .catch((error: unknown) => {
@@ -173,8 +185,7 @@ function wire(app: HTMLDivElement): void {
     if (device.protocol !== "stm32-dfu" || device.transport !== "usb") {
       resultPanel.hidden = false;
       resultPanel.classList.add("errored");
-      resultText.className = "result-text error";
-      resultText.textContent = `Protocol "${device.protocol}" is not implemented yet.`;
+      resultContent.innerHTML = `<p class="result-text error">Protocol "${device.protocol}" is not implemented yet.</p>`;
       updateStatus("error");
       return;
     }
@@ -194,19 +205,50 @@ function wire(app: HTMLDivElement): void {
     void flashStm32Dfu(device.device, firmwareBytes, onStep)
       .then((flashResult) => {
         resultPanel.hidden = false;
-        resultText.className = flashResult.ok ? "result-text ok" : "result-text error";
         resultPanel.classList.toggle("done", flashResult.ok);
         resultPanel.classList.toggle("errored", !flashResult.ok);
-        resultText.textContent = flashResult.ok
-          ? `Success — ${flashResult.bytesWritten} bytes written and verified.`
-          : `Flash completed but verification failed (${flashResult.bytesWritten} bytes written).`;
+        if (flashResult.ok) {
+          resultContent.innerHTML = `<p class="result-text ok">Success — ${flashResult.bytesWritten} bytes written and verified.</p>`;
+        } else {
+          renderErrorScreen(resultContent, {
+            title: "Verification failed",
+            message: `Flash completed but the readback didn't match what was written (${flashResult.bytesWritten} bytes written). This is safe to retry — every page is erased again before it's rewritten.`,
+            retryLabel: "Try again",
+            onRetry: () => flashButton.click(),
+          });
+        }
         updateStatus(flashResult.ok ? "done" : "error");
       })
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
         resultPanel.hidden = false;
         resultPanel.classList.add("errored");
-        resultText.className = "result-text error";
-        resultText.textContent = `Flash failed: ${error instanceof Error ? error.message : String(error)}`;
+
+        // A physical disconnect can surface here as an ordinary transfer
+        // failure (e.g. "stall") before the WebUSB `disconnect` event that
+        // clears `device` (via handleDeviceDisconnected) has had a chance
+        // to fire — confirmed on real hardware, not just a theoretical
+        // race. Give it a brief window to arrive before deciding which
+        // message to show, rather than trusting `device`'s state at the
+        // instant this handler starts running.
+        if (device) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+
+        if (!device) {
+          renderErrorScreen(resultContent, {
+            title: "Keyboard disconnected",
+            message: "The connection was lost during flashing. This is safe to retry — every page is erased again before it's rewritten, so nothing already flashed is corrupted. Put the keyboard back in bootloader mode and pair again.",
+            retryLabel: "Pair again",
+            onRetry: () => pairButton.click(),
+          });
+        } else {
+          renderErrorScreen(resultContent, {
+            title: "Flash failed",
+            message: error instanceof Error ? error.message : String(error),
+            retryLabel: "Try again",
+            onRetry: () => flashButton.click(),
+          });
+        }
         updateStatus("error");
       })
       .finally(() => {
@@ -220,6 +262,8 @@ function wire(app: HTMLDivElement): void {
   });
 
   resetButton.addEventListener("click", () => {
+    unwatchDisconnect?.();
+    unwatchDisconnect = null;
     firmwareBytes = null;
     device = null;
     firmwareInput.value = "";
@@ -232,6 +276,7 @@ function wire(app: HTMLDivElement): void {
     renderProgress(progressContainer, undefined);
     resultPanel.hidden = true;
     resultPanel.classList.remove("done", "errored");
+    resultContent.innerHTML = "";
     updateFlashButtonState();
   });
 

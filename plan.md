@@ -114,14 +114,27 @@ qmk-browser-flasher/
    readback. Retargeted from the originally-planned AVR DFU happy path
    since the Air75 V2 was the hardware actually available to test against
    — see the STM32 DfuSe row added to Section 3 and `docs/PROTOCOL_NOTES.md`.
-   Verified end-to-end on real hardware 2026-08-04.
-3. **M2 — HalfKay support**: same happy-path flow for a Teensy-based board.
-4. **M3 — Bootloader-entry UX**: reset-button instructions + magic-key jump
-   where supported, board lookup table.
-5. **M4 — Caterina/WebSerial support**.
-6. **M5 — Hardening**: error recovery on mid-flash disconnect, wider
-   chip-parameter coverage, safety docs.
-7. **M6 (stretch)** — UF2/RP2040 support.
+   Verified end-to-end on real hardware 2026-08-04. Its chip-parameter
+   lookup was later replaced with live on-device detection (reading the
+   DfuSe memory-layout USB string descriptor instead of a per-board data
+   table) after adding a second board exposed a real bug: every ST DFU
+   bootloader shares the same generic USB ID, so a second per-chip
+   data-table entry keyed by that ID would silently collide with the
+   first and apply the wrong chip's page size.
+3. **M2 — HalfKay support**: same happy-path flow for a Teensy-based
+   board. Blocked: no Teensy/HalfKay hardware available to test against.
+4. **M3 — Bootloader-entry UX** ✅: reset-button/magic-key instructions
+   (informational only — WebUSB can only ever see a device already in DFU
+   mode, so entry itself can't be automated or detected in advance) plus
+   the `board-db` lookup backing them. Shipped 2026-08-05 alongside a
+   broader UI pass (dark theme, drag/drop firmware upload, live
+   phase-based progress bar, step-log table) — see `docs/PROTOCOL_NOTES.md`.
+5. **M4 — Caterina/WebSerial support**. Blocked: no AVR109/Caterina
+   hardware available to test against.
+6. **M5 — Hardening** (in progress as of 2026-08-05): error recovery on
+   mid-flash disconnect, wider chip-parameter coverage, safety docs.
+7. **M6 (stretch)** — UF2/RP2040 support. Blocked: no RP2040 hardware
+   available to test against.
 
 ## 8. Licensing & Attribution
 

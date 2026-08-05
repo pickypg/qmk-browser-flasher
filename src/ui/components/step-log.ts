@@ -3,8 +3,7 @@ import type { FlashPhase, FlashStepEvent } from "../../types/index.js";
 /** Unit word used when formatting a live "current / total" status, keyed
  * by phase — omitted phases (preparing/finishing) never carry current/total. */
 const PROGRESS_UNITS: Partial<Record<FlashPhase, string>> = {
-  erasing: "pages",
-  writing: "bytes",
+  flashing: "bytes",
   verifying: "bytes",
 };
 
@@ -32,9 +31,10 @@ export function resetStepLog(tbody: HTMLTableSectionElement): void {
 
 /** Appends one row per named operation on "start" and updates that same
  * row's status cell on every later event for it — "progress" events keep
- * the row live (e.g. "3 / 10 pages") without adding a new row per chunk,
- * so an operation with many device round-trips (erasing dozens of pages,
- * writing hundreds of blocks) still shows as a single line. */
+ * the row live (e.g. "12,288 / 131,072 bytes") without adding a new row
+ * per chunk, so an operation with many device round-trips (erasing dozens
+ * of pages interleaved with hundreds of write blocks) still shows as a
+ * single line. */
 export function appendOrUpdateStepRow(tbody: HTMLTableSectionElement, event: FlashStepEvent): void {
   const key = keyFor(event);
 

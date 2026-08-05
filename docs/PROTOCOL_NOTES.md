@@ -86,23 +86,50 @@ size — a real corruption risk, since flash pages that don't get an
 explicit erase before being written just get ANDed with old contents
 rather than cleanly overwritten.
 
+**Non-uniform sector sizes** (e.g. the STM32F4 family's mixed 16KB/64KB/
+128KB sectors, described as comma-separated groups in the same descriptor
+string) are handled by both the parser and `planErasePages` in
+`stm32-dfu.ts`, which walks per-segment page sizes rather than assuming
+one flat size. This is presently **logic-verified only** — covered by
+unit tests against a synthetic F4-shaped descriptor
+(`test/protocols/stm32-dfu.test.ts`, `test/protocols/dfuse-memory-layout.test.ts`)
+— not verified against real F4-family hardware, since none has been
+available to test against so far.
+
 ### Progress reporting: phase-based step events, not a flat byte count
 
 `flashStm32Dfu`'s optional callback takes a `FlashStepEvent` (see
 `src/types/index.ts`), not a bare `{bytesWritten, totalBytes}` pair: each
-event carries a `phase` (`preparing`/`erasing`/`writing`/`verifying`/
-`finishing`), a human-readable `label`, and a `status` of `start`/
-`progress`/`ok`/`error`. `current`/`total` are present when there's a
-meaningful count for that step (pages erased, bytes written/read) and
-absent for one-shot steps (checking device state, leaving DFU mode) — the
-UI treats the latter as indeterminate rather than assuming 0%. `status:
-"progress"` fires once per transfer chunk purely to animate a progress
-bar; `start`/`ok`/`error` are sparse (one pair per named operation, e.g.
-one row per erased page, one for the whole write phase) and are what a
-step-log UI should render as rows. The still-stub protocols
+event carries a `phase` (`preparing`/`flashing`/`verifying`/`finishing`),
+a human-readable `label`, and a `status` of `start`/`progress`/`ok`/
+`error`. `current`/`total` are present when there's a meaningful count for
+that step (bytes written/read) and absent for one-shot steps (checking
+device state, leaving DFU mode) — the UI treats the latter as
+indeterminate rather than assuming 0%. `status: "progress"` fires once per
+transfer chunk purely to animate a progress bar; `start`/`ok`/`error` are
+sparse (one pair for the entire phase, not one per page/chunk) and are
+what a step-log UI should render as rows. The still-stub protocols
 (`avr-dfu.ts`, `halfkay.ts`, `caterina.ts`, `uf2-picoboot.ts`) share this
 same `onStep` contract in their signatures for whenever they're
 implemented.
+
+Erase and write share a single `"flashing"` phase/row rather than two —
+they always run interleaved per chunk now (erase the page(s) a chunk
+needs, immediately write that chunk, then move on to the next), never as
+separate batched passes, so treating them as one operation is accurate,
+not just a UI simplification. (An earlier version of this UI did report
+them as two independent phases; that made the progress bar's phase label
+flip between "Erasing"/"Writing" on every chunk once erase+write were
+interleaved, which is why they were merged.) `detail` on each `progress`
+event still says which sub-step is active ("Erasing page 0x..." vs
+"Writing block at 0x...") — `current`/`total` track bytes written, so the
+number only advances once a chunk's write completes.
+
+The interleaving itself matters for more than UI polish: if flashing is
+interrupted, it keeps the window where a page sits erased-but-not-yet-
+rewritten to at most one chunk, rather than the whole image. See
+`docs/SAFETY.md` for why that window matters specifically for boards
+using a software/magic-key bootloader-entry mechanism.
 
 ## AVR DFU (Atmel/LUFA) — researched, not yet implemented
 
