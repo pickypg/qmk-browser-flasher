@@ -95,6 +95,23 @@ actually distinguish boards (unlike the shared bootloader-mode ID
 above), and are used only to preselect instructions in the UI — never
 for pairing or flashing.
 
+**The same board-specific IDs are also recoverable straight from a
+compiled `.bin`**, with no device connected at all: any USB-capable
+firmware embeds its own 18-byte USB device descriptor as literal bytes
+in flash (`src/core/firmware-parser/usb-descriptor.ts`), since the USB
+stack needs that table regardless of protocol. Confirmed empirically
+against a real compiled NuPhy Air75 V2 build — `bLength=18,
+bDescriptorType=DEVICE, bcdUSB=2.00, maxPacket=64, idVendor=0x19F5,
+idProduct=0x3246, bcdDevice=0x0120` — with `bcdDevice` (0x0120 =
+"1.2.0") independently matching `keyboard.json`'s `device_version`
+field, which rules out a coincidental byte match. `findUsbDeviceDescriptor`
+scans for this shape (anchored on `bLength`/`bDescriptorType`, sanity-
+checked on `bMaxPacketSize0`/string indices/`bNumConfigurations` to
+avoid false positives) and only returns a result when exactly one
+distinct candidate is found — used to preselect/cross-check the board in
+`board-db` against what's about to be flashed, purely advisory (see
+`docs/SAFETY.md`).
+
 **Non-uniform sector sizes** (e.g. the STM32F4 family's mixed 16KB/64KB/
 128KB sectors, described as comma-separated groups in the same descriptor
 string) are handled by both the parser and `planErasePages` in

@@ -1,7 +1,9 @@
+import { findBoardByHidIds } from "./board-db/index.js";
 import { requestUsbDevice, watchForDisconnect } from "./core/device-picker.js";
+import { findUsbDeviceDescriptor } from "./core/firmware-parser/usb-descriptor.js";
 import { flashStm32Dfu } from "./protocols/stm32-dfu.js";
 import "./styles.css";
-import type { FlashableDevice, FlashStepEvent } from "./types/index.js";
+import type { BoardEntry, FlashableDevice, FlashStepEvent } from "./types/index.js";
 import { wireDropzone } from "./ui/components/dropzone.js";
 import { renderErrorScreen } from "./ui/components/error-screen.js";
 import { renderPicker } from "./ui/components/picker.js";
@@ -39,11 +41,6 @@ function render(): void {
 
       <p class="status-line" data-role="status"></p>
 
-      <section class="panel" data-role="prepare-panel">
-        <h2>Prepare your keyboard</h2>
-        <div data-role="board-picker"></div>
-      </section>
-
       <section class="panel" data-role="firmware-panel">
         <h2>Firmware</h2>
         <div class="dropzone" data-role="dropzone">
@@ -53,6 +50,12 @@ function render(): void {
           <p class="dropzone-filename" data-role="firmware-name"></p>
           <p class="dropzone-error" data-role="firmware-error"></p>
         </div>
+        <p class="mismatch-warning" data-role="mismatch-warning"></p>
+      </section>
+
+      <section class="panel" data-role="prepare-panel">
+        <h2>Prepare your keyboard</h2>
+        <div data-role="board-picker"></div>
       </section>
 
       <section class="panel" data-role="pair-panel">
@@ -92,7 +95,6 @@ function render(): void {
     </div>
   `;
 
-  renderPicker(app.querySelector<HTMLDivElement>('[data-role="board-picker"]')!);
   wire(app);
 }
 
@@ -113,10 +115,25 @@ function wire(app: HTMLDivElement): void {
   const resultPanel = app.querySelector<HTMLElement>('[data-role="result-panel"]')!;
   const resultContent = app.querySelector<HTMLDivElement>('[data-role="result-content"]')!;
   const resetButton = app.querySelector<HTMLButtonElement>("#reset-button")!;
+  const mismatchWarning = app.querySelector<HTMLParagraphElement>('[data-role="mismatch-warning"]')!;
 
   let firmwareBytes: Uint8Array | null = null;
   let device: FlashableDevice | null = null;
   let unwatchDisconnect: (() => void) | null = null;
+  let selectedBoard: BoardEntry | undefined;
+  let detectedFirmwareBoard: BoardEntry | undefined;
+
+  function updateMismatchWarning(): void {
+    mismatchWarning.textContent =
+      detectedFirmwareBoard && selectedBoard && detectedFirmwareBoard.id !== selectedBoard.id
+        ? `This firmware looks like it's for ${detectedFirmwareBoard.name}, not the selected ${selectedBoard.name}. Double-check before flashing.`
+        : "";
+  }
+
+  const picker = renderPicker(app.querySelector<HTMLDivElement>('[data-role="board-picker"]')!, (board) => {
+    selectedBoard = board;
+    updateMismatchWarning();
+  });
 
   function handleDeviceDisconnected(): void {
     device = null;
@@ -147,6 +164,17 @@ function wire(app: HTMLDivElement): void {
     void file.arrayBuffer().then((buffer) => {
       firmwareBytes = new Uint8Array(buffer);
       firmwareName.textContent = `${file.name} (${firmwareBytes.length.toLocaleString()} bytes)`;
+
+      const descriptor = findUsbDeviceDescriptor(firmwareBytes);
+      detectedFirmwareBoard = descriptor ? findBoardByHidIds(descriptor.vendorId, descriptor.productId) : undefined;
+      if (detectedFirmwareBoard && !picker.getSelectedBoard()) {
+        // Nothing picked yet — the firmware itself is the strongest signal
+        // of which board this is for, so use it (fires onSelectionChange,
+        // which also updates the mismatch warning below).
+        picker.selectBoard(detectedFirmwareBoard.id);
+      }
+      updateMismatchWarning();
+
       updateFlashButtonState();
     });
   }
@@ -266,6 +294,8 @@ function wire(app: HTMLDivElement): void {
     unwatchDisconnect = null;
     firmwareBytes = null;
     device = null;
+    detectedFirmwareBoard = undefined;
+    updateMismatchWarning();
     firmwareInput.value = "";
     firmwareName.textContent = "";
     firmwareError.textContent = "";

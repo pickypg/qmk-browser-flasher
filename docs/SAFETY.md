@@ -18,8 +18,14 @@ and tested against real hardware, not written speculatively up front.
   firmware") before the flash button is enabled.
 - What verification does **not** cover: whether the firmware file itself is
   correct or intended for this specific board. The tool checks that it fits
-  within the detected flash size and nothing more — flashing the wrong
-  board's firmware, if it happens to fit, is not detected or blocked.
+  within the detected flash size, and — since 2026-08-05 — scans the file
+  for its own embedded USB device descriptor (`src/core/firmware-parser/
+  usb-descriptor.ts`) to show an advisory warning if it looks like it's for
+  a different board than the one selected. This is a heuristic byte-pattern
+  scan over a raw binary, not a real container format with a checksum, so
+  it's silent (no false alarm) whenever detection is ambiguous — it
+  reduces this risk, it doesn't eliminate it, and it never blocks
+  flashing.
 
 ## Bricking risk by protocol
 
@@ -95,4 +101,5 @@ old/new state. Concretely:
   Zadig-based driver swap; not solvable purely in-browser (see `plan.md`
   Section 9).
 - **Firmware/board mismatch**: see "What verification does not cover"
-  above — this is the main risk still fully on the user.
+  above — partially mitigated by the advisory warning, but ultimately
+  still on the user, since the warning is heuristic and never blocks.

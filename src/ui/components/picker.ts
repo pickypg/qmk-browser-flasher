@@ -1,9 +1,16 @@
 import { boards } from "../../board-db/index.js";
 import { detectBoardViaHid } from "../../core/board-detect.js";
-import type { BootloaderEntryMethod } from "../../types/index.js";
+import type { BoardEntry, BootloaderEntryMethod } from "../../types/index.js";
 
 const GENERIC_INSTRUCTIONS =
   "Common ways to enter bootloader/DFU mode: hold a magic key (often Esc or Space) while plugging the keyboard in, press a physical reset button (sometimes only accessible through a small hole), or use a QMK keycode/shortcut if your board supports one. Check your keyboard's own documentation for the exact method — WebUSB can only see a board once it's already in bootloader mode, so it can't identify one automatically that way. If your keyboard is currently connected and running normally, the \"Detect my keyboard\" button below may be able to identify it instead, via WebHID.";
+
+export interface PickerHandle {
+  /** Programmatically selects a board (e.g. from firmware-file detection)
+   * and updates the shown instructions — a no-op if boardId isn't known. */
+  selectBoard(boardId: string): void;
+  getSelectedBoard(): BoardEntry | undefined;
+}
 
 function describeBootloaderEntry(entry: BootloaderEntryMethod): string {
   switch (entry.kind) {
@@ -22,8 +29,11 @@ function describeBootloaderEntry(entry: BootloaderEntryMethod): string {
  * mode, so this never gates pairing — it's informational only. An opt-in
  * "Detect my keyboard" button (WebHID, a separate permission grant from
  * the WebUSB one used for actual pairing) can preselect the right board;
- * nothing is prompted unless the user clicks it. */
-export function renderPicker(container: HTMLElement): void {
+ * nothing is prompted unless the user clicks it. `onSelectionChange` fires
+ * for every change regardless of cause (user, detect button, or a caller's
+ * `selectBoard`), so callers can stay in sync with the current selection —
+ * e.g. main.ts uses it to compare against a firmware-file-detected board. */
+export function renderPicker(container: HTMLElement, onSelectionChange?: (board: BoardEntry | undefined) => void): PickerHandle {
   const hidSupported = "hid" in navigator;
 
   container.innerHTML = `
@@ -44,14 +54,16 @@ export function renderPicker(container: HTMLElement): void {
   const detectStatus = container.querySelector<HTMLParagraphElement>('[data-role="detect-status"]')!;
   const instructions = container.querySelector<HTMLParagraphElement>('[data-role="board-instructions"]')!;
 
-  function updateInstructionsFor(boardId: string): void {
+  function applySelection(boardId: string): void {
     const board = boards.find((b) => b.id === boardId);
+    select.value = board?.id ?? "";
     instructions.innerHTML = board ? describeBootloaderEntry(board.bootloaderEntry) : GENERIC_INSTRUCTIONS;
+    onSelectionChange?.(board);
   }
 
   select.addEventListener("change", () => {
     detectStatus.textContent = "";
-    updateInstructionsFor(select.value);
+    applySelection(select.value);
   });
 
   detectButton.addEventListener("click", () => {
@@ -60,8 +72,7 @@ export function renderPicker(container: HTMLElement): void {
     void detectBoardViaHid(navigator.hid, boards)
       .then((board) => {
         if (board) {
-          select.value = board.id;
-          updateInstructionsFor(board.id);
+          applySelection(board.id);
         } else {
           detectStatus.textContent = "No matching board found — pick yours above, or check its own documentation.";
         }
@@ -73,4 +84,9 @@ export function renderPicker(container: HTMLElement): void {
         detectButton.disabled = false;
       });
   });
+
+  return {
+    selectBoard: applySelection,
+    getSelectedBoard: () => boards.find((b) => b.id === select.value),
+  };
 }
