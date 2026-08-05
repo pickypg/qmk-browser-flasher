@@ -21,8 +21,18 @@ export interface BoardEntry {
   readonly id: string;
   readonly name: string;
   readonly protocol: Protocol;
+  /** Bootloader-mode (e.g. DFU) USB IDs — generic to the chip's ROM
+   * bootloader, not the board, and can collide across boards (see
+   * docs/PROTOCOL_NOTES.md). Not used for matching, kept for reference. */
   readonly usbVendorId?: number;
   readonly usbProductId?: number;
+  /** The board's own USB IDs while running its normal application
+   * firmware (not in bootloader mode) — specific enough to actually
+   * identify the board, unlike usbVendorId/usbProductId above. Used only
+   * for opt-in WebHID board detection (src/core/board-detect.ts) to
+   * preselect bootloader-entry instructions; never for pairing/flashing. */
+  readonly hidVendorId?: number;
+  readonly hidProductId?: number;
   readonly bootloaderEntry: BootloaderEntryMethod;
 }
 

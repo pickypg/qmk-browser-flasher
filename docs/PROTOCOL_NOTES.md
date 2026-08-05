@@ -86,6 +86,15 @@ size — a real corruption risk, since flash pages that don't get an
 explicit erase before being written just get ANDed with old contents
 rather than cleanly overwritten.
 
+`BoardEntry` (`src/types/index.ts`) still carries this generic
+`usbVendorId`/`usbProductId` pair for reference, but it's a separate
+concept from `hidVendorId`/`hidProductId` added for opt-in WebHID board
+detection (`src/core/board-detect.ts`): those are the board's own IDs
+while running its normal application firmware, specific enough to
+actually distinguish boards (unlike the shared bootloader-mode ID
+above), and are used only to preselect instructions in the UI — never
+for pairing or flashing.
+
 **Non-uniform sector sizes** (e.g. the STM32F4 family's mixed 16KB/64KB/
 128KB sectors, described as comma-separated groups in the same descriptor
 string) are handled by both the parser and `planErasePages` in

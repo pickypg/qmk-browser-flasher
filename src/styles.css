@@ -104,6 +104,32 @@ input[type="text"] {
   font-size: 0.9rem;
 }
 
+[data-role="board-picker"] {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.board-detect-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.board-detect-row select {
+  flex: 1;
+}
+
+.detect-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.detect-status:empty {
+  display: none;
+}
+
 .instructions {
   margin: 0;
   color: var(--text);

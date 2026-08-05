@@ -5,6 +5,8 @@
     "protocol": "stm32-dfu",
     "usbVendorId": 1155,
     "usbProductId": 57105,
+    "hidVendorId": 6645,
+    "hidProductId": 12870,
     "bootloaderEntry": { "kind": "magic-key", "key": "Esc" }
   },
   {
