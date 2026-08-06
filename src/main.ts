@@ -1,15 +1,24 @@
 import { findBoardByHidIds } from "./board-db/index.js";
 import { requestUsbDevice, watchForDisconnect } from "./core/device-picker.js";
+import { parseBin } from "./core/firmware-parser/bin.js";
+import { findDfuSuffix } from "./core/firmware-parser/dfu-suffix.js";
+import { parseIntelHex } from "./core/firmware-parser/intel-hex.js";
 import { findUsbDeviceDescriptor } from "./core/firmware-parser/usb-descriptor.js";
-import { flashStm32Dfu } from "./protocols/stm32-dfu.js";
+import { flashStm32Dfu, STM32_FLASH_BASE } from "./protocols/stm32-dfu.js";
 import "./styles.css";
 import type { BoardEntry, FlashableDevice, FlashStepEvent } from "./types/index.js";
-import { wireDropzone } from "./ui/components/dropzone.js";
+import { isHexFile, wireDropzone } from "./ui/components/dropzone.js";
 import { renderErrorScreen } from "./ui/components/error-screen.js";
 import { renderPicker } from "./ui/components/picker.js";
 import { renderProgress } from "./ui/components/progress-bar.js";
 import { appendOrUpdateStepRow, resetStepLog } from "./ui/components/step-log.js";
 import { createInitialFlowState, type FlowStep } from "./ui/flow.js";
+
+function parseFirmwareFile(file: File): Promise<{ bytes: Uint8Array; startAddress: number }> {
+  return isHexFile(file)
+    ? file.text().then((text) => parseIntelHex(text))
+    : file.arrayBuffer().then((buffer) => parseBin(new Uint8Array(buffer), STM32_FLASH_BASE));
+}
 
 const STEP_LABELS: Record<FlowStep, string> = {
   "select-firmware": "Choose your firmware and pair your keyboard",
@@ -44,9 +53,9 @@ function render(): void {
       <section class="panel" data-role="firmware-panel">
         <h2>Firmware</h2>
         <div class="dropzone" data-role="dropzone">
-          <p>Drag and drop a <code>.bin</code> file here, or</p>
+          <p>Drag and drop a <code>.bin</code> or <code>.hex</code> file here, or</p>
           <label class="file-button" for="firmware-input">Browse files</label>
-          <input type="file" id="firmware-input" accept=".bin" hidden />
+          <input type="file" id="firmware-input" accept=".bin,.hex" hidden />
           <p class="dropzone-filename" data-role="firmware-name"></p>
           <p class="dropzone-error" data-role="firmware-error"></p>
         </div>
@@ -161,22 +170,48 @@ function wire(app: HTMLDivElement): void {
 
   function acceptFirmware(file: File): void {
     firmwareError.textContent = "";
-    void file.arrayBuffer().then((buffer) => {
-      firmwareBytes = new Uint8Array(buffer);
-      firmwareName.textContent = `${file.name} (${firmwareBytes.length.toLocaleString()} bytes)`;
+    void parseFirmwareFile(file)
+      .then((image) => {
+        if (image.startAddress !== STM32_FLASH_BASE) {
+          throw new Error(
+            `This firmware starts at 0x${image.startAddress.toString(16)}, but STM32 flash starts at 0x${STM32_FLASH_BASE.toString(16)} — it doesn't look like it's for a board this tool supports.`,
+          );
+        }
 
-      const descriptor = findUsbDeviceDescriptor(firmwareBytes);
-      detectedFirmwareBoard = descriptor ? findBoardByHidIds(descriptor.vendorId, descriptor.productId) : undefined;
-      if (detectedFirmwareBoard && !picker.getSelectedBoard()) {
-        // Nothing picked yet — the firmware itself is the strongest signal
-        // of which board this is for, so use it (fires onSelectionChange,
-        // which also updates the mismatch warning below).
-        picker.selectBoard(detectedFirmwareBoard.id);
-      }
-      updateMismatchWarning();
+        let bytes = image.bytes;
+        const suffix = findDfuSuffix(bytes);
+        if (suffix) {
+          if (!suffix.crcValid) {
+            throw new Error("This file has a DFU suffix (dfu-util metadata) with an invalid checksum — it may be corrupted or truncated.");
+          }
+          bytes = bytes.subarray(0, bytes.length - 16);
+        }
 
-      updateFlashButtonState();
-    });
+        firmwareBytes = bytes;
+        firmwareName.textContent = suffix
+          ? `${file.name} (${bytes.length.toLocaleString()} bytes, DFU suffix removed)`
+          : `${file.name} (${bytes.length.toLocaleString()} bytes)`;
+
+        const descriptor = findUsbDeviceDescriptor(firmwareBytes);
+        detectedFirmwareBoard = descriptor ? findBoardByHidIds(descriptor.vendorId, descriptor.productId) : undefined;
+        if (detectedFirmwareBoard && !picker.getSelectedBoard()) {
+          // Nothing picked yet — the firmware itself is the strongest signal
+          // of which board this is for, so use it (fires onSelectionChange,
+          // which also updates the mismatch warning below).
+          picker.selectBoard(detectedFirmwareBoard.id);
+        }
+        updateMismatchWarning();
+
+        updateFlashButtonState();
+      })
+      .catch((error: unknown) => {
+        firmwareBytes = null;
+        firmwareName.textContent = "";
+        detectedFirmwareBoard = undefined;
+        updateMismatchWarning();
+        firmwareError.textContent = error instanceof Error ? error.message : String(error);
+        updateFlashButtonState();
+      });
   }
 
   wireDropzone(

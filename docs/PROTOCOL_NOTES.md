@@ -3,6 +3,60 @@
 Per-protocol implementation notes and spec references, filled in as each
 protocol is implemented (see `plan.md` Section 3 for priority order).
 
+## Firmware file formats
+
+`.bin` (`src/core/firmware-parser/bin.ts`) and `.hex`/Intel HEX
+(`src/core/firmware-parser/intel-hex.ts`) are both accepted. Both parsers
+are intentionally **protocol-agnostic** — they know nothing about STM32
+or any other chip, just the file format itself, returning a plain
+`FirmwareImage {bytes, startAddress}`. A `.bin` has no embedded address at
+all (`main.ts` supplies `STM32_FLASH_BASE` as its `startAddress`, since
+that's the only protocol implemented so far), while `.hex` declares its
+own via Extended Linear/Segment Address records — real example confirmed
+locally: `:020000040800F2` → upper 16 bits `0800` → base `0x08000000`,
+exactly STM32's flash base. `main.ts` cross-checks a parsed `.hex`'s
+`startAddress` against `stm32-dfu.ts`'s exported `STM32_FLASH_BASE` and
+rejects a mismatch with a clear error — that check belongs in `main.ts`
+(the STM32-specific caller), not the parser, since a future non-STM32
+protocol could legitimately have a different base address.
+
+Gaps between Intel HEX data records are filled with **`0x00`, not
+`0xFF`** — confirmed by parsing a real `.hex`/`.bin` pair from the same
+build (`nuphy-qmk-firmware`'s `claude_test` target) and diffing the
+result: zero byte differences once `0x00` was used, versus mismatches at
+`0xFF`. This matches what `arm-none-eabi-objcopy -O binary` itself
+zero-fills between ELF sections — an "erased flash is 0xFF" assumption
+would have been wrong here.
+
+Also found via that same diff: the reference `.bin` was 16 bytes longer
+than the `.hex`-derived image, all in a trailing block starting with the
+ASCII bytes `"UFD"`. That's `dfu-util`'s `dfu-suffix` tool, run only on
+the `.bin` build target (`nuphy-qmk-firmware`'s
+`builddefs/common_rules.mk`) — it appends a 16-byte DFU suffix (VID/PID/
+CRC metadata for command-line `dfu-util` users), which is not firmware
+content and was never meant to be flashed. The `.hex` build target never
+gets one, so excluding it is correct.
+
+**Detected, validated, and stripped as of 2026-08-05**
+(`src/core/firmware-parser/dfu-suffix.ts`): `main.ts` no longer flashes
+this suffix. `findDfuSuffix` looks for the format (`bcdDevice(2,LE)
+idProduct(2,LE) idVendor(2,LE) bcdDFU(2,LE) "UFD" bLength(1)=16
+CRC32(4,LE)`), anchored on the `"UFD"` signature and `bLength`, same
+"don't guess on an ambiguous anchor" discipline as
+`usb-descriptor.ts`/`intel-hex.ts` — most `.bin` files won't have one,
+and that's not an error. When found, its CRC32 (over everything but the
+CRC field itself) is checked before stripping the 16 bytes — a
+corrupted/truncated file now gets caught *before* it ever reaches the
+device, which readback verification alone can't do. The CRC32 variant
+needed empirical trial: standard poly `0xEDB88320`, init `0xFFFFFFFF`,
+but **without** the final inversion most CRC-32 implementations (zlib,
+PNG, gzip) apply — confirmed by brute-force matching against the real
+embedded CRC value in the same NuPhy `.bin` used throughout this
+document. The suffix's VID/PID is the same generic ST bootloader ID as
+`usbVendorId`/`usbProductId` elsewhere in this project (not the board's
+own), so it's an integrity check only — it doesn't feed the
+mismatch-warning logic, which stays on `findUsbDeviceDescriptor`.
+
 ## STM32 DfuSe (ST factory bootloader) — implemented in M1
 
 Target: `src/protocols/stm32-dfu.ts`. Used by QMK's `stm32-dfu` bootloader

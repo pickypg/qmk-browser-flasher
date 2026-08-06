@@ -1,13 +1,16 @@
-/** Extension check for a firmware file — pure so it's testable without a
- * DOM. Only `.bin` is currently supported (see core/firmware-parser/bin.ts);
- * `.hex`/`.uf2` will get their own checks once those parsers exist. */
+/** Extension checks for a firmware file — pure so they're testable
+ * without a DOM. `.uf2` will get its own check once that parser exists. */
 export function isBinFile(file: File): boolean {
   return file.name.toLowerCase().endsWith(".bin");
 }
 
+export function isHexFile(file: File): boolean {
+  return file.name.toLowerCase().endsWith(".hex");
+}
+
 /** Wires drag/drop plus the existing browse-button `<input type=file>` onto
  * a dropzone container: highlights on drag-over, forwards an accepted file
- * to `onFile`, and reports a rejected (non-.bin) file via `onRejected`
+ * to `onFile`, and reports a rejected (non-.bin/.hex) file via `onRejected`
  * instead of silently ignoring it. */
 export function wireDropzone(container: HTMLElement, input: HTMLInputElement, onFile: (file: File) => void, onRejected: (message: string) => void): void {
   const setDragOver = (over: boolean): void => {
@@ -15,8 +18,8 @@ export function wireDropzone(container: HTMLElement, input: HTMLInputElement, on
   };
 
   const handleFile = (file: File): void => {
-    if (!isBinFile(file)) {
-      onRejected(`"${file.name}" is not a .bin file.`);
+    if (!isBinFile(file) && !isHexFile(file)) {
+      onRejected(`"${file.name}" is not a .bin or .hex file.`);
       return;
     }
     onFile(file);

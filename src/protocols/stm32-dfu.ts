@@ -40,7 +40,7 @@ const DFU_INTERFACE_SUBCLASS = 0x01;
 /** Every STM32 part maps its main flash here — this is architectural, not
  * board- or chip-specific, so it's safe to use as a fixed lookup key into
  * the device's own reported memory segments. */
-const STM32_FLASH_BASE = 0x08000000;
+export const STM32_FLASH_BASE = 0x08000000;
 
 interface DfuStatus {
   readonly status: number;

@@ -120,19 +120,59 @@ qmk-browser-flasher/
    table) after adding a second board exposed a real bug: every ST DFU
    bootloader shares the same generic USB ID, so a second per-chip
    data-table entry keyed by that ID would silently collide with the
-   first and apply the wrong chip's page size.
+   first and apply the wrong chip's page size. Firmware-format support
+   was extended 2026-08-05 to Intel HEX (`.hex`) alongside `.bin` —
+   unlike `.bin`, a `.hex` file declares its own base address per record,
+   which is now cross-checked against `stm32-dfu.ts`'s
+   `STM32_FLASH_BASE` before flashing, a validation `.bin` never had
+   anything to check against. Verified against a real `.hex`/`.bin` pair
+   from the same build (byte-for-byte identical once gaps were filled
+   with `0x00`, matching what `arm-none-eabi-objcopy` itself does — an
+   initial `0xFF`/"erased flash" assumption was wrong). A related finding
+   — the reference `.bin` carries a 16-byte `dfu-util` DFU suffix, which
+   was being flashed along with the real firmware since the `.bin` path
+   had no suffix awareness — was fixed the same day: `findDfuSuffix`
+   (`src/core/firmware-parser/dfu-suffix.ts`) detects, CRC32-validates
+   (catching a corrupted/truncated download before it ever reaches the
+   device), and strips a real suffix before flashing. See
+   `docs/PROTOCOL_NOTES.md` for the verified byte layout and CRC32
+   variant (empirically confirmed, not assumed).
 3. **M2 — HalfKay support**: same happy-path flow for a Teensy-based
    board. Blocked: no Teensy/HalfKay hardware available to test against.
 4. **M3 — Bootloader-entry UX** ✅: reset-button/magic-key instructions
-   (informational only — WebUSB can only ever see a device already in DFU
-   mode, so entry itself can't be automated or detected in advance) plus
-   the `board-db` lookup backing them. Shipped 2026-08-05 alongside a
+   (informational only — WebUSB alone can only ever see a device already
+   in DFU mode, so entry itself can't be automated or detected that way)
+   plus the `board-db` lookup backing them. Shipped 2026-08-05 alongside a
    broader UI pass (dark theme, drag/drop firmware upload, live
    phase-based progress bar, step-log table) — see `docs/PROTOCOL_NOTES.md`.
+   Extended 2026-08-05 with two opt-in detection paths that preselect the
+   right instructions without waiting on a manual pick: a "Detect my
+   keyboard" button (WebHID — a board's own USB IDs are specific enough to
+   identify it while running normally, unlike the shared DFU-mode ID; a
+   separate permission grant from pairing, so it's gated behind an
+   explicit click rather than prompting automatically), and passive
+   detection straight from a dropped-in firmware file (compiled firmware
+   embeds its own USB device descriptor as literal bytes — confirmed
+   empirically against a real build; see `docs/PROTOCOL_NOTES.md`), which
+   also now warns (advisory, non-blocking) if the loaded firmware doesn't
+   match the selected board.
 5. **M4 — Caterina/WebSerial support**. Blocked: no AVR109/Caterina
    hardware available to test against.
-6. **M5 — Hardening** (in progress as of 2026-08-05): error recovery on
-   mid-flash disconnect, wider chip-parameter coverage, safety docs.
+6. **M5 — Hardening** ✅: error recovery on mid-flash disconnect
+   (`watchForDisconnect` + a retry-capable error screen), wider
+   chip-parameter coverage (non-uniform-sector-size test coverage; no F4
+   hardware to verify against beyond that), safety docs (`docs/SAFETY.md`
+   rewritten with a per-protocol bricking-risk table). Shipped
+   2026-08-05. A real regression was found and fixed via the user's own
+   live disconnect testing during this milestone, not hypothesized:
+   erase and write had been batched (erase everything, then write
+   everything) purely to collapse a step-log row count, which widened the
+   window where an interrupted flash could leave a board's software
+   bootloader-entry trigger (e.g. a magic-key check, itself part of the
+   application firmware) erased with nothing rewritten yet. Fixed by
+   interleaving erase+write per chunk again, validated twice on real
+   hardware (once requiring the board's physical reset button before the
+   fix, once with the software trigger still working after the fix).
 7. **M6 (stretch)** — UF2/RP2040 support. Blocked: no RP2040 hardware
    available to test against.
 
