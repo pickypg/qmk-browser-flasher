@@ -37,7 +37,8 @@ protocol rather than claimed as a blanket guarantee.
 | Protocol             | Bricking risk from this tool | Why |
 | --------------------- | ----------------------------- | --- |
 | `stm32-dfu`            | Low                            | The ST DFU bootloader lives in a separate system memory region (~`0x1FFFxxxx`), not in the application flash region this tool writes to (`0x08000000`+). A botched or interrupted flash can't corrupt the bootloader itself — **the chip's ROM bootloader is always intact**. This is a property of STM32's bootloader design specifically. |
-| `avr-dfu` / `halfkay` / `caterina` / `uf2-picoboot` | Not yet researched | Not implemented yet (see `plan.md` §7) — bootloader/flash layout for these hasn't been investigated, so no claim is made either way. Update this row when each one ships. |
+| `uf2-picoboot`         | Low                            | Same shape as `stm32-dfu`: RP2040's PICOBOOT bootloader lives in on-chip mask ROM, entirely separate from the external QSPI flash this protocol erases/writes (`0x10000000`+). A botched or interrupted flash can't damage the bootloader itself. Entry (BOOTSEL) is a hardware pin sampled at boot, independent of application firmware state — see `boards.json`'s `adafruit-macropad-rp2040` entry. |
+| `avr-dfu` / `halfkay` / `caterina` | Not yet researched | Not implemented yet (see `plan.md` §7) — bootloader/flash layout for these hasn't been investigated, so no claim is made either way. Update this row when each one ships. |
 
 ### The chip's bootloader being intact isn't the same as being able to *reach* it
 
@@ -103,3 +104,12 @@ old/new state. Concretely:
 - **Firmware/board mismatch**: see "What verification does not cover"
   above — partially mitigated by the advisory warning, but ultimately
   still on the user, since the warning is heuristic and never blocks.
+- **`uf2-picoboot` doesn't query the device's actual flash size**: unlike
+  `stm32-dfu` (which reads its flash size live from the device's own
+  memory-layout descriptor), PICOBOOT has no simple command for this —
+  querying it for real would mean executing code on-device to read the
+  flash chip's JEDEC ID, which `picotool` does but is significantly more
+  machinery than this project has needed elsewhere. An oversized image
+  just fails with a real protocol error partway through instead of a
+  pre-flight message. Not expected to matter for real QMK-sized firmware
+  on a 2MB+ Pico-class board; see `docs/PROTOCOL_NOTES.md`.

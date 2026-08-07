@@ -3,21 +3,37 @@ import { requestUsbDevice, watchForDisconnect } from "./core/device-picker.js";
 import { parseBin } from "./core/firmware-parser/bin.js";
 import { findDfuSuffix } from "./core/firmware-parser/dfu-suffix.js";
 import { parseIntelHex } from "./core/firmware-parser/intel-hex.js";
+import { parseUf2 } from "./core/firmware-parser/uf2.js";
 import { findUsbDeviceDescriptor } from "./core/firmware-parser/usb-descriptor.js";
 import { flashStm32Dfu, STM32_FLASH_BASE } from "./protocols/stm32-dfu.js";
+import { flashUf2Picoboot, RP2040_FLASH_BASE } from "./protocols/uf2-picoboot.js";
 import "./styles.css";
-import type { BoardEntry, FlashableDevice, FlashStepEvent } from "./types/index.js";
-import { isHexFile, wireDropzone } from "./ui/components/dropzone.js";
+import type { BoardEntry, FlashableDevice, FlashResult, FlashStepEvent, Protocol } from "./types/index.js";
+import { isHexFile, isUf2File, wireDropzone } from "./ui/components/dropzone.js";
 import { renderErrorScreen } from "./ui/components/error-screen.js";
 import { renderPicker } from "./ui/components/picker.js";
 import { renderProgress } from "./ui/components/progress-bar.js";
 import { appendOrUpdateStepRow, resetStepLog } from "./ui/components/step-log.js";
 import { createInitialFlowState, type FlowStep } from "./ui/flow.js";
 
+/** Expected FirmwareImage.startAddress per protocol — used both to
+ * validate a loaded file looks like it's for a board this tool supports
+ * at all, and (in acceptFirmware/flash-click below) to catch a firmware
+ * file loaded for one protocol being flashed at a paired device speaking
+ * the other, now that there's more than one address space in play. */
+const EXPECTED_FLASH_BASE: Partial<Record<Protocol, number>> = {
+  "stm32-dfu": STM32_FLASH_BASE,
+  "uf2-picoboot": RP2040_FLASH_BASE,
+};
+
 function parseFirmwareFile(file: File): Promise<{ bytes: Uint8Array; startAddress: number }> {
-  return isHexFile(file)
-    ? file.text().then((text) => parseIntelHex(text))
-    : file.arrayBuffer().then((buffer) => parseBin(new Uint8Array(buffer), STM32_FLASH_BASE));
+  if (isHexFile(file)) {
+    return file.text().then((text) => parseIntelHex(text));
+  }
+  if (isUf2File(file)) {
+    return file.arrayBuffer().then((buffer) => parseUf2(new Uint8Array(buffer)));
+  }
+  return file.arrayBuffer().then((buffer) => parseBin(new Uint8Array(buffer), STM32_FLASH_BASE));
 }
 
 const STEP_LABELS: Record<FlowStep, string> = {
@@ -53,9 +69,9 @@ function render(): void {
       <section class="panel" data-role="firmware-panel">
         <h2>Firmware</h2>
         <div class="dropzone" data-role="dropzone">
-          <p>Drag and drop a <code>.bin</code> or <code>.hex</code> file here, or</p>
+          <p>Drag and drop a <code>.bin</code>, <code>.hex</code>, or <code>.uf2</code> file here, or</p>
           <label class="file-button" for="firmware-input">Browse files</label>
-          <input type="file" id="firmware-input" accept=".bin,.hex" hidden />
+          <input type="file" id="firmware-input" accept=".bin,.hex,.uf2" hidden />
           <p class="dropzone-filename" data-role="firmware-name"></p>
           <p class="dropzone-error" data-role="firmware-error"></p>
         </div>
@@ -127,6 +143,7 @@ function wire(app: HTMLDivElement): void {
   const mismatchWarning = app.querySelector<HTMLParagraphElement>('[data-role="mismatch-warning"]')!;
 
   let firmwareBytes: Uint8Array | null = null;
+  let firmwareFlashBase: number | undefined;
   let device: FlashableDevice | null = null;
   let unwatchDisconnect: (() => void) | null = null;
   let selectedBoard: BoardEntry | undefined;
@@ -172,11 +189,12 @@ function wire(app: HTMLDivElement): void {
     firmwareError.textContent = "";
     void parseFirmwareFile(file)
       .then((image) => {
-        if (image.startAddress !== STM32_FLASH_BASE) {
+        if (image.startAddress !== STM32_FLASH_BASE && image.startAddress !== RP2040_FLASH_BASE) {
           throw new Error(
-            `This firmware starts at 0x${image.startAddress.toString(16)}, but STM32 flash starts at 0x${STM32_FLASH_BASE.toString(16)} — it doesn't look like it's for a board this tool supports.`,
+            `This firmware starts at 0x${image.startAddress.toString(16)}, which doesn't match any board this tool supports (STM32: 0x${STM32_FLASH_BASE.toString(16)}, RP2040: 0x${RP2040_FLASH_BASE.toString(16)}).`,
           );
         }
+        firmwareFlashBase = image.startAddress;
 
         let bytes = image.bytes;
         const suffix = findDfuSuffix(bytes);
@@ -206,6 +224,7 @@ function wire(app: HTMLDivElement): void {
       })
       .catch((error: unknown) => {
         firmwareBytes = null;
+        firmwareFlashBase = undefined;
         firmwareName.textContent = "";
         detectedFirmwareBoard = undefined;
         updateMismatchWarning();
@@ -245,10 +264,31 @@ function wire(app: HTMLDivElement): void {
     if (!firmwareBytes || !device) {
       return;
     }
-    if (device.protocol !== "stm32-dfu" || device.transport !== "usb") {
+
+    if (device.transport !== "usb" || (device.protocol !== "stm32-dfu" && device.protocol !== "uf2-picoboot")) {
       resultPanel.hidden = false;
       resultPanel.classList.add("errored");
       resultContent.innerHTML = `<p class="result-text error">Protocol "${device.protocol}" is not implemented yet.</p>`;
+      updateStatus("error");
+      return;
+    }
+
+    // Now that two protocols with different flash address spaces exist,
+    // a firmware file validated for one (e.g. a .uf2 for RP2040) could in
+    // principle be flashed at a paired device speaking the other (e.g. an
+    // STM32 board) — neither flasher would catch this itself, since
+    // neither reads the firmware's own start address, only the device's.
+    // Catch it here, before starting any actual USB communication.
+    const expectedBase = EXPECTED_FLASH_BASE[device.protocol];
+    if (expectedBase !== undefined && firmwareFlashBase !== undefined && firmwareFlashBase !== expectedBase) {
+      resultPanel.hidden = false;
+      resultPanel.classList.add("errored");
+      renderErrorScreen(resultContent, {
+        title: "Firmware/device mismatch",
+        message: `This firmware starts at 0x${firmwareFlashBase.toString(16)}, but the paired device's "${device.protocol}" bootloader expects flash starting at 0x${expectedBase.toString(16)} — it doesn't look like it's for this device.`,
+        retryLabel: "Choose different firmware",
+        onRetry: () => firmwareInput.click(),
+      });
       updateStatus("error");
       return;
     }
@@ -265,7 +305,9 @@ function wire(app: HTMLDivElement): void {
       appendOrUpdateStepRow(stepLogBody, event);
     };
 
-    void flashStm32Dfu(device.device, firmwareBytes, onStep)
+    const flashPromise: Promise<FlashResult> = device.protocol === "stm32-dfu" ? flashStm32Dfu(device.device, firmwareBytes, onStep) : flashUf2Picoboot(device.device, firmwareBytes, onStep);
+
+    void flashPromise
       .then((flashResult) => {
         resultPanel.hidden = false;
         resultPanel.classList.toggle("done", flashResult.ok);
@@ -328,6 +370,7 @@ function wire(app: HTMLDivElement): void {
     unwatchDisconnect?.();
     unwatchDisconnect = null;
     firmwareBytes = null;
+    firmwareFlashBase = undefined;
     device = null;
     detectedFirmwareBoard = undefined;
     updateMismatchWarning();

@@ -16,5 +16,15 @@
     "usbVendorId": 1155,
     "usbProductId": 57105,
     "bootloaderEntry": { "kind": "reset-button" }
+  },
+  {
+    "id": "adafruit-macropad-rp2040",
+    "name": "Adafruit MacroPad RP2040",
+    "protocol": "uf2-picoboot",
+    "usbVendorId": 11914,
+    "usbProductId": 3,
+    "hidVendorId": 9114,
+    "hidProductId": 264,
+    "bootloaderEntry": { "kind": "reset-button" }
   }
 ]

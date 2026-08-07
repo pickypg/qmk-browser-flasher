@@ -16,9 +16,10 @@ like QMK Toolbox.
 - Not supporting Firefox or Safari (no WebUSB/WebHID support).
 - Not attempting full QMK Toolbox parity (no serial console/debug log
   viewer, no audio device tooling) in v1.
-- UF2/RP2040 mass-storage-style bootloaders deferred to a later phase —
-  significantly different transfer model (PICOBOOT) from the DFU/HID
-  protocols targeted first.
+- Not supporting RP2040's mass-storage (`.uf2` drag-and-drop) bootloader
+  path at all — not reachable from a browser. RP2040 support (M6) instead
+  targets its separate PICOBOOT USB interface, WebUSB-reachable like the
+  DFU/HID protocols targeted first.
 
 ## 3. Target Bootloader Protocols (in priority order)
 
@@ -28,7 +29,7 @@ like QMK Toolbox.
 | AVR DFU (Atmel/LUFA)       | WebUSB                            | P0       | Most common on classic AVR QMK boards; reference implementation exists (webdfu, JS — will need a TS port/rewrite) |
 | HalfKay (Teensy)           | WebHID                            | P0       | Simple fixed-packet HID protocol, good first target                                                               |
 | Caterina (AVR109/STK500v2) | WebSerial                         | P1       | Serial-based, not USB control transfers — different API                                                           |
-| UF2 / PICOBOOT (RP2040)    | WebUSB (PICOBOOT) or mass-storage | P2       | Deferred; most complex, least standardized across vendors                                                         |
+| UF2 / PICOBOOT (RP2040)    | WebUSB (PICOBOOT)                 | P2       | Implemented (M6) — mass-storage half of the pair (drag-and-drop `.uf2`) turned out not to matter once PICOBOOT covered the WebUSB path |
 
 ## 4. Architecture / Module Breakdown
 
@@ -173,8 +174,38 @@ qmk-browser-flasher/
    interleaving erase+write per chunk again, validated twice on real
    hardware (once requiring the board's physical reset button before the
    fix, once with the software trigger still working after the fix).
-7. **M6 (stretch)** — UF2/RP2040 support. Blocked: no RP2040 hardware
-   available to test against.
+7. **M6 (stretch)** — UF2/RP2040 support ✅: unblocked once the user had
+   real RP2040 hardware to test against (an Adafruit MacroPad RP2040).
+   Targets RP2040's **PICOBOOT** USB interface over WebUSB — the same one
+   `picotool` talks to — rather than the mass-storage `.uf2` drag-and-drop
+   path QMK Toolbox uses, since Chrome has no API for writing into an
+   arbitrary mounted mass-storage volume. Protocol facts (command struct,
+   status codes, the exclusive-access/exit-XIP ordering requirement,
+   flash/write alignment constants) were verified against
+   `raspberrypi/pico-sdk`'s and `raspberrypi/picotool`'s own source
+   (BSD-3-Clause, facts only — same citation discipline as the
+   `dfu-util`/`dfu-programmer` citations elsewhere in this project), not
+   guessed. Architecturally simpler than `stm32-dfu` in one respect —
+   RP2040's flash layout (base address, sector/page size) is fixed rather
+   than read live, so there's no per-chip memory-layout descriptor to
+   parse — but genuinely new in another: this is the first time two
+   protocols with different flash address spaces have coexisted, so
+   `main.ts` gained an explicit firmware/device address-space mismatch
+   check that couldn't have mattered before. Also added: `.uf2` file
+   parsing (`src/core/firmware-parser/uf2.ts`, block-format validation
+   against `microsoft/uf2`'s spec) and a `raspberrypi/usb-pid`-confirmed
+   generic RP2040 bootloader ID (`2E8A:0003`) alongside STM32's in
+   `device-picker.ts`. Board data for the Adafruit MacroPad RP2040
+   (`board-db/boards.json`) sourced directly from upstream
+   `qmk_firmware`'s `keyboards/adafruit/macropad`, not a fork this time.
+   A known, accepted gap: unlike `stm32-dfu`, this doesn't query the
+   device's actual physical flash size before writing (PICOBOOT has no
+   simple command for it) — an oversized image fails with a real protocol
+   error instead of a pre-flight message; see `docs/SAFETY.md`. Landed
+   2026-08-06 with full unit-test coverage against a simulated PICOBOOT
+   device (`test/protocols/uf2-picoboot.test.ts`,
+   `test/core/firmware-parser/uf2.test.ts`) and confirmed end-to-end on
+   the user's real MacroPad RP2040 the same day.
 
 ## 8. Licensing & Attribution
 

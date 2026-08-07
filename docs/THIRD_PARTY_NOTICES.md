@@ -32,7 +32,12 @@ verified from each.
 | `keychron-qmk-firmware` | Keychron K1 Pro board data (bootloader entry, MCU)          | GPL-2/3 (QMK fork)     | Consulted for M2 (`src/board-db/boards.json`, `docs/SUPPORTED_BOARDS.md`) — data only          |
 | `dfu-programmer`   | Atmel AVR DFU command bytes (`src/atmel.c`) | GPL-2.0                | Consulted ahead of the AVR DFU milestone (not yet implemented) — facts only, no code copied |
 | `webdfu`           | AVR DFU protocol reference (original plan)  | ISC                    | Not yet used — AVR DFU milestone not started                                                |
-| QMK Firmware       | General chip/board parameter reference      | Mixed (GPLv2/MIT/BSD/Apache, per-file) | Consulted via the `nuphy-qmk-firmware`/`keychron-qmk-firmware` forks so far; upstream `qmk_firmware` not yet used directly |
+| `pico-sdk`         | PICOBOOT command struct/IDs/status codes (`boot/picoboot.h`), flash constants (`hardware/flash.h`, `addressmap.h`) | BSD-3-Clause | Consulted for M6 (`src/protocols/uf2-picoboot.ts`) — facts only, no code copied |
+| `picotool`         | PICOBOOT bulk-transfer sequencing and exclusive-access/exit-XIP ordering (`picoboot_connection/`) | BSD-3-Clause | Consulted for M6 (`src/protocols/uf2-picoboot.ts`) — facts only, no code copied |
+| `usb-pid`          | RP2040 bootloader USB ID (`2E8A:0003`)      | N/A (data repo)        | Consulted for M6 (`src/core/device-picker.ts`)                                              |
+| `microsoft/uf2`     | `.uf2` file format spec and family ID list  | MIT                    | Consulted for M6 (`src/core/firmware-parser/uf2.ts`) — facts only, no code copied           |
+| `adafruit/macropad-rp2040` (QMK upstream) | Adafruit MacroPad RP2040 board data (bootloader entry, USB IDs, MCU) | GPL-2/3 (QMK)  | Consulted for M6 (`src/board-db/boards.json`, `docs/SUPPORTED_BOARDS.md`) — data only        |
+| QMK Firmware       | General chip/board parameter reference      | Mixed (GPLv2/MIT/BSD/Apache, per-file) | Consulted via the `nuphy-qmk-firmware`/`keychron-qmk-firmware` forks and, for M6, directly against upstream `qmk_firmware`'s `keyboards/adafruit/macropad` |
 
 ## Per-file attribution
 

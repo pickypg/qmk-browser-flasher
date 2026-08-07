@@ -248,6 +248,142 @@ Not yet implemented. Target: `src/protocols/halfkay.ts`.
 
 Not yet implemented. Target: `src/protocols/caterina.ts`.
 
-## UF2 / PICOBOOT (RP2040) — P2, deferred
+## UF2 / PICOBOOT (RP2040)
 
-Not yet implemented. Target: `src/protocols/uf2-picoboot.ts`.
+Target: `src/protocols/uf2-picoboot.ts` (WebUSB) and
+`src/core/firmware-parser/uf2.ts` (`.uf2` file parsing). Implemented
+2026-08-06 against protocol facts verified from source (see citations
+below), unit-tested against a simulated PICOBOOT device, and confirmed
+end-to-end on real hardware (an Adafruit MacroPad RP2040) the same day —
+see M6 in `plan.md`.
+
+QMK Toolbox's RP2040 support works by copying the `.uf2` file onto the
+`RPI-RP2` mass-storage drive the ROM bootloader exposes — not reachable
+from a browser (no WebUSB/File System Access API path to an arbitrary
+mounted mass-storage volume). RP2040's ROM bootloader also exposes a
+second, vendor-specific USB interface called **PICOBOOT** — the same one
+`picotool` talks to — with direct erase/write/read commands over ordinary
+bulk transfers, reachable via WebUSB. That's what's implemented here.
+
+Command bytes, transfer sequencing, and the ordering requirements below
+were cross-checked against `raspberrypi/pico-sdk`'s
+`src/common/boot_picoboot_headers/include/boot/picoboot.h` (struct
+layout, command IDs, status codes) and `raspberrypi/picotool`'s
+`picoboot_connection/picoboot_connection.c` + `picoboot_connection_cxx.cpp`
+(the actual bulk-transfer flow) — both BSD-3-Clause, **read for
+wire-protocol facts only, nothing copied**, same policy as the
+`dfu-util`/`dfu-programmer` citations above.
+
+**Bootloader USB ID**: `2E8A:0003` (Raspberry Pi Trading Ltd / "RP2
+Boot"), confirmed against `raspberrypi/usb-pid`. Same generic-ID
+situation as STM32's `0483:DF11` — every RP2040 board in BOOTSEL mode
+enumerates identically, so board identity can't come from this.
+
+**Interface**: vendor-specific (`bInterfaceClass = 0xFF`), exactly two
+bulk endpoints (one IN, one OUT) — found by scanning
+`device.configuration.interfaces` for that shape, not assumed ordinal,
+same discipline as `findDfuInterface`/`findFlashAlternate`.
+
+**Command packet** (`picoboot_cmd`, 32 bytes, all multi-byte fields LE):
+
+```
+dMagic(4)=0x431fd10b  dToken(4)  bCmdId(1)  bCmdSize(1)  _unused(2)  dTransferLength(4)  args[16]
+```
+
+Command IDs used here: `PC_EXCLUSIVE_ACCESS=0x01` (`args`: `bExclusive`
+u8), `PC_REBOOT=0x02` (`dPC(4) dSP(4) dDelayMS(4)`),
+`PC_FLASH_ERASE=0x03` (`dAddr(4) dSize(4)`), `PC_WRITE=0x05` (same args
+as erase; `dSize == dTransferLength`), `PC_EXIT_XIP=0x06` (no args, no
+transfer), `PC_READ=0x84` (same args as erase/write; the high bit set on
+a command id means an IN-direction data phase).
+
+**Transfer sequence per command**, confirmed from
+`picoboot_connection.c`'s `picoboot_cmd()`: send the 32-byte command via
+bulk OUT → if `dTransferLength != 0`, a data phase in the direction the
+command id's high bit indicates (bulk IN for `PC_READ`, bulk OUT for
+`PC_WRITE`) → then a zero-length **ack in the opposite direction** (bulk
+OUT ZLP for IN-shaped commands, bulk IN ZLP for OUT-shaped/no-data
+commands).
+
+**Control requests** (vendor/interface recipient, separate from the bulk
+command protocol above): `PICOBOOT_IF_RESET = 0x41` (OUT, no data —
+clears any stuck state from a previous session; paired with `clearHalt`
+on both bulk endpoints first) and `PICOBOOT_IF_CMD_STATUS = 0x42` (IN, 16
+bytes: `dToken(4) dStatusCode(4) bCmdId(1) bInProgress(1) pad(6)`) — the
+latter isn't used by this implementation (errors are surfaced from the
+bulk transfer's own status instead), but is documented here for anyone
+extending this to decode a real `picoboot_status` error code.
+
+**Status codes** (`enum picoboot_status`, 0–17): `OK=0`, `UNKNOWN_CMD=1`,
+`INVALID_CMD_LENGTH=2`, `INVALID_TRANSFER_LENGTH=3`, `INVALID_ADDRESS=4`,
+`BAD_ALIGNMENT=5`, `INTERLEAVED_WRITE=6`, `REBOOTING=7`,
+`UNKNOWN_ERROR=8`, `INVALID_STATE=9`, `NOT_PERMITTED=10`,
+`INVALID_ARG=11`, `BUFFER_TOO_SMALL=12`, `PRECONDITION_NOT_MET=13`,
+`MODIFIED_DATA=14`, `INVALID_DATA=15`, `NOT_FOUND=16`,
+`UNSUPPORTED_MODIFICATION=17`.
+
+**Mandatory ordering** — confirmed via `raspberrypi/pico-feedback` issue
+#59 and `picoboot::connection`'s constructor/destructor, not obvious from
+the header alone: `WRITE` **hangs** if `EXCLUSIVE_ACCESS` wasn't sent
+first, and **silently corrupts data with no error** if `EXIT_XIP` wasn't
+sent first. Both are session-level — sent once at the start of a flash,
+not per chunk (`flashUf2Picoboot`'s `"preparing"` phase).
+
+**Flash addressing**: `dAddr` for `FLASH_ERASE`/`WRITE`/`READ` is the
+full XIP address (`0x10000000`+, `RP2040_FLASH_BASE`), not a
+flash-relative offset — confirmed via the same pico-feedback issue.
+
+**Constants** (`hardware/flash.h`, `addressmap.h`): `FLASH_SECTOR_SIZE =
+4096` (erase granularity — `FLASH_ERASE`'s `dAddr`/`dSize` must both be
+sector-aligned/sector-multiples), `FLASH_PAGE_SIZE = 256` (write
+granularity, same rule for `WRITE`), `SRAM_END = 0x20042000` (used as the
+stack pointer for the post-flash reboot).
+
+**Reboot into the new firmware**: `PC_REBOOT` with `dPC=0` (boot normally
+from the flash vector table — not a literal jump address), `dSP=SRAM_END
+(0x20042000)`, `dDelayMS=500` — the same form `picotool`'s own
+load-and-execute path uses. `PC_REBOOT2` exists and is what current
+`picotool` prefers, but needs a `dFlags` enum not defined in `picoboot.h`
+itself plus RP2350-era model detection this project has no reason to
+carry; classic `PC_REBOOT` is simpler and sufficient for RP2040-only
+scope.
+
+**Erase/write chunking**: unlike STM32 (some parts have non-uniform
+sector sizes, handled by `planErasePages`), RP2040's sector size is
+architecturally uniform, so `flashUf2Picoboot` erases and writes exactly
+one `4096`-byte sector per chunk, interleaved (erase immediately followed
+by writing that sector), same reasoning as `stm32-dfu.ts` — keeps the
+"erased but not yet rewritten" window to at most one sector. The final
+chunk of an image not landing on a 256-byte boundary is padded with
+`0xFF` (the erased-flash fill value) up to the next page boundary before
+`WRITE`, since `WRITE`'s size must be a page multiple; the padding only
+ever extends past the real firmware's end within the already-erased
+target sector, so it's inert.
+
+**Known scope gap**: PICOBOOT has no simple command to query the
+device's actual physical flash size (would require executing code
+on-device to read the flash chip's JEDEC ID, which `picotool` does but is
+significantly more machinery than STM32's live memory-layout descriptor
+string gives for free). This implementation doesn't attempt it — an
+oversized image simply fails with a real protocol error instead of a
+pre-flight message. Not expected to matter for real QMK-sized firmware on
+a 2MB+ Pico-class board.
+
+### UF2 file format
+
+Confirmed against `microsoft/uf2`'s spec/`uf2families.json`. 512-byte
+blocks, each:
+
+```
+magicStart0(4)=0x0A324655  magicStart1(4)=0x9E5D5157  flags(4)  targetAddr(4)
+payloadSize(4)  blockNo(4)  numBlocks(4)  familyID(4)  data(476)  magicEnd(4)=0x0AB16F30
+```
+
+Flag `0x00000001` = "not main flash, skip this block"; `0x00002000` =
+the `familyID` field is populated (cross-checked against RP2040's family
+ID, `0xE48BFF56`, when present — a file tagged for a different family
+throws rather than silently flashing the wrong image).
+`src/core/firmware-parser/uf2.ts`'s `parseUf2` assembles the flash-bound
+blocks into one contiguous `FirmwareImage`, throwing on any gap/overlap
+between blocks — real QMK RP2040 builds are a single contiguous image, so
+this is a format-sanity check, not a feature.

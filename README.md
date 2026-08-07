@@ -1,16 +1,17 @@
 # QMK Browser Flasher
 
-A browser-based tool for flashing compiled QMK firmware (`.bin`/`.hex`) to a
-keyboard's microcontroller using WebUSB/WebHID, without a native app like QMK
-Toolbox. Chromium-based browsers only (Chrome/Edge/Brave) — see
+A browser-based tool for flashing compiled QMK firmware (`.bin`/`.hex`/`.uf2`)
+to a keyboard's microcontroller using WebUSB/WebHID, without a native app like
+QMK Toolbox. Chromium-based browsers only (Chrome/Edge/Brave) — see
 [`plan.md`](plan.md) for full scope, architecture, and milestones.
 
-**Status**: STM32 DfuSe boards (e.g. NuPhy Air75 V2) can be flashed
-end-to-end, verified on real hardware — see
+**Status**: STM32 DfuSe boards (e.g. NuPhy Air75 V2) and RP2040 boards over
+its PICOBOOT USB interface (e.g. Adafruit MacroPad RP2040) can both be
+flashed end-to-end, verified on real hardware — see
 [`docs/SUPPORTED_BOARDS.md`](docs/SUPPORTED_BOARDS.md) for what's been
 tested and [`docs/SAFETY.md`](docs/SAFETY.md) for bricking risk and
-recovery. HalfKay/Teensy, Caterina/AVR109, and UF2/RP2040 support are
-planned but blocked on hardware to test against (see `plan.md` §7).
+recovery. HalfKay/Teensy and Caterina/AVR109 support are planned but
+blocked on hardware to test against (see `plan.md` §7).
 
 ## Development
 
