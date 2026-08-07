@@ -224,12 +224,13 @@ describe("flashStm32Dfu", () => {
     // between "Erasing"/"Writing" on every chunk.
     expect(events.filter((e) => e.phase === "flashing" && (e.status === "start" || e.status === "ok"))).toHaveLength(2);
 
+    // One combined "Page 0x..." progress event per chunk (not separate
+    // erase/write ones — reporting them separately made the live activity
+    // indicator flicker between two messages for every chunk).
     const flashingProgress = events.filter((e) => e.phase === "flashing" && e.status === "progress");
-    const eraseProgress = flashingProgress.filter((e) => e.detail?.startsWith("Erasing page 0x"));
-    const writeProgress = flashingProgress.filter((e) => e.detail?.startsWith("Writing block at 0x"));
-    expect(eraseProgress).toHaveLength(2); // one per page
-    expect(writeProgress).toHaveLength(2); // one per chunk
-    expect(writeProgress.at(-1)).toMatchObject({ current: bytes.length, total: bytes.length });
+    expect(flashingProgress.every((e) => e.detail?.startsWith("Page 0x"))).toBe(true);
+    expect(flashingProgress).toHaveLength(2); // one per chunk
+    expect(flashingProgress.at(-1)).toMatchObject({ current: bytes.length, total: bytes.length });
 
     const verifyingProgress = events.filter((e) => e.phase === "verifying" && e.status === "progress");
     expect(verifyingProgress.at(-1)).toMatchObject({ current: bytes.length, total: bytes.length });

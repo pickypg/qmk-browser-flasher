@@ -314,8 +314,7 @@ async function runPhaseStep<T>(onStep: ((event: FlashStepEvent) => void) | undef
 
 /** Erases every page covering [start, end] not already in `erasedPages`
  * (via `planErasePages`), executing each erase immediately rather than
- * just planning it — `onPageErased` fires right after each one so the
- * caller can report progress as it actually happens. */
+ * just planning it. */
 async function eraseChunkRange(
   device: USBDevice,
   interfaceNumber: number,
@@ -323,14 +322,12 @@ async function eraseChunkRange(
   start: number,
   end: number,
   erasedPages: Set<number>,
-  onPageErased: (pageStart: number) => void,
 ): Promise<void> {
   for (const pageStart of planErasePages(segments, start, end)) {
     if (!erasedPages.has(pageStart)) {
       const pageLabel = `Erasing page 0x${pageStart.toString(16)}`;
       await withContext(pageLabel, () => runSpecialCommand(device, interfaceNumber, encodeErasePage(pageStart)));
       erasedPages.add(pageStart);
-      onPageErased(pageStart);
     }
   }
 }
@@ -363,9 +360,12 @@ export async function flashStm32Dfu(device: USBDevice, bytes: Uint8Array, onStep
   // separate erase/write ones) since the two now always happen together —
   // treating them as independent phases was a holdover from when erasing
   // ran as its own pass, and it made the progress bar's phase label flip
-  // on every chunk. Progress is tracked by bytes written; which page is
-  // currently being erased (if any) shows up in `detail` instead of as
-  // its own counted total.
+  // on every chunk. `detail` reports one combined "Page 0x..." message per
+  // chunk (after both erase and write finish, rendered as "Flashing: Page
+  // 0x..." by the progress bar) rather than separate erase/write messages
+  // — reporting them separately made the live activity indicator flicker
+  // between two messages for every chunk, which read as confusing rather
+  // than informative.
   const label = "Flashing firmware";
   const erasedPages = new Set<number>();
 
@@ -376,14 +376,11 @@ export async function flashStm32Dfu(device: USBDevice, bytes: Uint8Array, onStep
       const address = flashStart + offset;
       const chunk = bytes.subarray(offset, Math.min(offset + DEFAULT_TRANSFER_SIZE, totalBytes));
 
-      await eraseChunkRange(device, interfaceNumber, segments, address, address + chunk.length - 1, erasedPages, (pageStart) => {
-        onStep?.({ phase: "flashing", label, status: "progress", current: offset, total: totalBytes, detail: `Erasing page 0x${pageStart.toString(16)}` });
-      });
+      await eraseChunkRange(device, interfaceNumber, segments, address, address + chunk.length - 1, erasedPages);
 
-      const writeLabel = `Writing block at 0x${address.toString(16)}`;
       await withContext(`Setting address 0x${address.toString(16)}`, () => runSpecialCommand(device, interfaceNumber, encodeSetAddress(address)));
-      await withContext(writeLabel, () => writeBlock(device, interfaceNumber, chunk));
-      onStep?.({ phase: "flashing", label, status: "progress", current: offset + chunk.length, total: totalBytes, detail: writeLabel });
+      await withContext(`Writing block at 0x${address.toString(16)}`, () => writeBlock(device, interfaceNumber, chunk));
+      onStep?.({ phase: "flashing", label, status: "progress", current: offset + chunk.length, total: totalBytes, detail: `Page 0x${address.toString(16)}` });
     }
 
     onStep?.({ phase: "flashing", label, status: "ok", current: totalBytes, total: totalBytes });

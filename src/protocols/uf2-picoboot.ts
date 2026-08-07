@@ -254,9 +254,7 @@ export async function flashUf2Picoboot(device: USBDevice, bytes: Uint8Array, onS
       const address = flashStart + offset;
       const chunkLen = Math.min(SECTOR_SIZE, totalBytes - offset);
 
-      const eraseLabel = `Erasing sector 0x${address.toString(16)}`;
-      await withContext(eraseLabel, () => flashErase(device, iface, address, SECTOR_SIZE));
-      onStep?.({ phase: "flashing", label, status: "progress", current: offset, total: totalBytes, detail: eraseLabel });
+      await withContext(`Erasing sector 0x${address.toString(16)}`, () => flashErase(device, iface, address, SECTOR_SIZE));
 
       // WRITE requires a page(256)-multiple size — pad the final,
       // possibly-short chunk with 0xFF (the erased-flash fill value),
@@ -266,9 +264,13 @@ export async function flashUf2Picoboot(device: USBDevice, bytes: Uint8Array, onS
       const writeBuf = new Uint8Array(writeLen).fill(0xff);
       writeBuf.set(bytes.subarray(offset, offset + chunkLen));
 
-      const writeLabel = `Writing sector at 0x${address.toString(16)}`;
-      await withContext(writeLabel, () => writeFlash(device, iface, address, writeBuf));
-      onStep?.({ phase: "flashing", label, status: "progress", current: offset + chunkLen, total: totalBytes, detail: writeLabel });
+      await withContext(`Writing sector at 0x${address.toString(16)}`, () => writeFlash(device, iface, address, writeBuf));
+      // A single combined "Sector 0x..." message (rendered as "Flashing:
+      // Sector 0x..." by the progress bar) reported once both erase and
+      // write finish, rather than separate erase/write messages —
+      // reporting them separately made the live activity indicator
+      // flicker between two messages for every sector.
+      onStep?.({ phase: "flashing", label, status: "progress", current: offset + chunkLen, total: totalBytes, detail: `Sector 0x${address.toString(16)}` });
     }
     onStep?.({ phase: "flashing", label, status: "ok", current: totalBytes, total: totalBytes });
   } catch (error) {

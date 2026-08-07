@@ -201,9 +201,13 @@ not just a UI simplification. (An earlier version of this UI did report
 them as two independent phases; that made the progress bar's phase label
 flip between "Erasing"/"Writing" on every chunk once erase+write were
 interleaved, which is why they were merged.) `detail` on each `progress`
-event still says which sub-step is active ("Erasing page 0x..." vs
-"Writing block at 0x...") — `current`/`total` track bytes written, so the
-number only advances once a chunk's write completes.
+event reports one combined message per chunk ("Page 0x...", rendered by
+the progress bar as "Flashing: Page 0x...") rather than separate
+erase/write messages — an earlier version emitted both, which made the
+live activity indicator flicker between the two on every chunk, and a
+version right after that fixed the flicker but repeated the phase word
+("Flashing: Flashing page 0x..."). `current`/`total` track bytes written,
+so the number only advances once a chunk's write completes.
 
 The interleaving itself matters for more than UI polish: if flashing is
 interrupted, it keeps the window where a page sits erased-but-not-yet-
